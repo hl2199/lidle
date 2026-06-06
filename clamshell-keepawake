@@ -1,0 +1,428 @@
+#!/bin/bash
+# clamshell-keepawake — give your MacBook a grace period before it sleeps.
+#
+# One command for the whole lifecycle. The hidden `_tick` subcommand is what the
+# LaunchDaemon runs every 60s; everything else is for humans:
+#
+#   sudo clamshell-keepawake install [hours]   install/enable (default 3h)
+#   sudo clamshell-keepawake uninstall         remove, re-enable normal sleep
+#   sudo clamshell-keepawake set <hours>       change the grace period
+#   sudo clamshell-keepawake pause [dur]       opt out (until 'resume', or e.g. 30m)
+#   sudo clamshell-keepawake resume            cancel a pause
+#        clamshell-keepawake status            show current state
+#        clamshell-keepawake logs              follow the daemon log
+#
+# No `set -e`: the _tick logic relies on `cond && action` lines and a `grep -c`
+# that exits non-zero on a 0 count, which are correct as written but would abort
+# under -e. The mutating steps that must succeed use explicit `|| die`.
+set -uo pipefail
+
+LABEL="com.clamshellkeepawake"
+PLIST="/Library/LaunchDaemons/${LABEL}.plist"
+BIN="/usr/local/bin/clamshell-keepawake"
+CONF="/usr/local/etc/clamshell-keepawake.conf"
+LOG="/var/log/clamshell-keepawake.log"
+
+# Runtime state (created by the daemon as root; world-readable so `status` works
+# without sudo).
+CLOSED_SINCE="/var/run/clamshell-keepawake.closed-since"
+OPEN_SINCE="/var/run/clamshell-keepawake.open-since"
+DONE="/var/run/clamshell-keepawake.done"
+PREV_LID="/var/run/clamshell-keepawake.prev-lid"
+PAUSED="/var/run/clamshell-keepawake.paused"
+
+DEFAULT_HOURS=3
+
+# ---- small helpers --------------------------------------------------------
+
+die() { echo "error: $*" >&2; exit 1; }
+
+need_root() {
+    [ "$(id -u)" -eq 0 ] || die "this command needs root. Re-run: sudo clamshell-keepawake ${1:-<cmd>}"
+}
+
+# Seconds -> "2 h 14 m" / "45 m" / "30 s".
+fmt_dur() {
+    local s="$1" h m
+    h=$(( s / 3600 )); m=$(( (s % 3600) / 60 ))
+    if [ "$h" -gt 0 ]; then
+        if [ "$m" -gt 0 ]; then echo "${h} h ${m} m"; else echo "${h} h"; fi
+    elif [ "$m" -gt 0 ]; then
+        echo "${m} m"
+    else
+        echo "${s} s"
+    fi
+}
+
+# Duration string -> seconds. Accepts <number>[s|m|h]; no suffix = minutes.
+parse_duration() {
+    local in="$1" num unit
+    [[ "$in" =~ ^([0-9]+(\.[0-9]+)?)([smh]?)$ ]] || return 1
+    num="${BASH_REMATCH[1]}"; unit="${BASH_REMATCH[3]}"
+    case "$unit" in
+        s)     awk -v n="$num" 'BEGIN{printf "%d", n+0.5}' ;;
+        h)     awk -v n="$num" 'BEGIN{printf "%d", n*3600+0.5}' ;;
+        m|"")  awk -v n="$num" 'BEGIN{printf "%d", n*60+0.5}' ;;
+    esac
+}
+
+clear_state() { rm -f "$CLOSED_SINCE" "$OPEN_SINCE" "$PREV_LID" "$DONE" "$PAUSED"; }
+
+# Current grace period in seconds (conf overrides the built-in default).
+hold_seconds() {
+    local HOLD=$(( DEFAULT_HOURS * 3600 ))
+    [ -r "$CONF" ] && . "$CONF"
+    echo "$HOLD"
+}
+
+lid_state() {
+    if ioreg -r -k AppleClamshellState -d 4 | grep -q '"AppleClamshellState" = Yes'; then
+        echo closed
+    else
+        echo open
+    fi
+}
+
+# ---- configuration / files ------------------------------------------------
+
+# Write conf + matching pmset timers for HOURS. Leaves APPLIED_HOLD / APPLIED_DISP
+# set for the caller's summary.
+apply_duration() {
+    local HOURS="$1" HOLD_SECONDS SLEEP_MIN DISP_MIN
+    awk -v h="$HOURS" 'BEGIN{exit !(h+0>0)}' \
+        || die "HOURS must be a positive number (got '${HOURS}')"
+    HOLD_SECONDS=$(awk -v h="$HOURS" 'BEGIN{printf "%d", (h*3600)+0.5}')
+    SLEEP_MIN=$(awk -v s="$HOLD_SECONDS" 'BEGIN{m=int((s/60)+0.5); if(m<1)m=1; print m}')
+    DISP_MIN=$(awk -v m="$SLEEP_MIN" 'BEGIN{ if(m>10) print 10; else {d=m-1; if(d<1)d=1; print d} }')
+
+    install -d -m 755 /usr/local/etc
+    printf 'HOLD=%s\n' "$HOLD_SECONDS" > "$CONF"
+    chmod 644 "$CONF"
+
+    # Idle sleep timer == grace period, so the lid-open case sleeps when the
+    # daemon releases `disablesleep`. disksleep matched for consistency.
+    pmset -a sleep "$SLEEP_MIN"
+    pmset -a disksleep "$SLEEP_MIN"
+    pmset -a displaysleep "$DISP_MIN"
+
+    APPLIED_HOLD=$HOLD_SECONDS
+    APPLIED_DISP=$DISP_MIN
+}
+
+write_plist() {
+    cat > "$PLIST" <<PLIST
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>${LABEL}</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>${BIN}</string>
+        <string>_tick</string>
+    </array>
+    <key>StartInterval</key>
+    <integer>60</integer>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>StandardOutPath</key>
+    <string>${LOG}</string>
+    <key>StandardErrorPath</key>
+    <string>${LOG}</string>
+</dict>
+</plist>
+PLIST
+    chmod 644 "$PLIST"
+    chown root:wheel "$PLIST"
+}
+
+# ---- _tick: the per-60s worker (run as root by launchd) -------------------
+#
+# Delay any natural system sleep by the grace period, then ALLOW (not force) it,
+# resetting whenever the computer is used again. `disablesleep` is held on so a
+# lid-close can't race us to sleep; at the grace mark we set it 0 and let macOS
+# sleep on its own. Because we only *allow* sleep, a power assertion (playback,
+# a download, screen sharing) still keeps the Mac awake past the mark, which is
+# correct: that sleep wasn't going to happen normally either.
+cmd_tick() {
+    local now HOLD lid prev idle_ns idle since_open ext until
+    now=$(date +%s)
+
+    # ---- Pause guard: while paused, behave like a normal Mac ----
+    if [ -f "$PAUSED" ]; then
+        until=$(cat "$PAUSED" 2>/dev/null || echo indefinite)
+        if [ "$until" != indefinite ] && [ "$until" -le "$now" ] 2>/dev/null; then
+            rm -f "$PAUSED"                  # expired -> fall through to normal logic
+        else
+            pmset -a disablesleep 0          # paused -> let macOS sleep normally
+            return 0
+        fi
+    fi
+
+    HOLD=10800
+    [ -r "$CONF" ] && . "$CONF"
+
+    lid=$(lid_state)
+    prev=$(cat "$PREV_LID" 2>/dev/null || true)
+    echo "$lid" > "$PREV_LID"
+
+    if [ "$lid" = open ]; then
+        # ---- Lid OPEN ----
+        rm -f "$CLOSED_SINCE" "$DONE"
+        if [ "$prev" != open ]; then
+            echo "$now" > "$OPEN_SINCE"          # just opened/woke/first run = in use
+        fi
+        [ -f "$OPEN_SINCE" ] || echo "$now" > "$OPEN_SINCE"
+        idle_ns=$(ioreg -c IOHIDSystem | awk '/HIDIdleTime/ {print $NF; exit}')
+        idle=$(( ${idle_ns:-0} / 1000000000 ))
+        since_open=$(( now - $(cat "$OPEN_SINCE") ))
+        [ "$since_open" -lt "$idle" ] && idle=$since_open   # idle = min(HID idle, time open)
+        if [ "$idle" -ge "$HOLD" ]; then
+            pmset -a disablesleep 0
+        else
+            pmset -a disablesleep 1
+        fi
+    else
+        # ---- Lid SHUT (built-in panel off -> this counts external monitors) ----
+        rm -f "$OPEN_SINCE"
+        ext=$(system_profiler SPDisplaysDataType 2>/dev/null | grep -c "Resolution:")
+        if [ "$ext" -gt 0 ]; then
+            rm -f "$CLOSED_SINCE" "$DONE"        # clamshell work: stay awake, no countdown
+            pmset -a disablesleep 1
+        elif [ -f "$DONE" ]; then
+            :                                    # already released this session; hands off
+        elif [ ! -f "$CLOSED_SINCE" ]; then
+            echo "$now" > "$CLOSED_SINCE"        # just unplugged / closed with no monitor
+            pmset -a disablesleep 1
+        elif [ $(( now - $(cat "$CLOSED_SINCE") )) -ge "$HOLD" ]; then
+            rm -f "$CLOSED_SINCE"
+            touch "$DONE"
+            pmset -a disablesleep 0              # grace up: lid shut -> macOS sleeps now
+        else
+            pmset -a disablesleep 1
+        fi
+    fi
+}
+
+# ---- install / uninstall / set --------------------------------------------
+
+print_install_summary() {
+    local HOURS="$1" awake awake_human
+    echo "Installed and loaded ${LABEL}."
+    awake=$(pmset -g | awk '/SleepDisabled/{print $2; exit}')
+    if [ "${awake:-0}" = 1 ]; then
+        awake_human="yes -- a keep-awake window is active right now"
+    else
+        awake_human="no -- normal sleep is in effect right now"
+    fi
+    echo
+    echo "What's now in effect:"
+    echo "  - Grace period: stays awake ${HOURS} hour(s) before it's allowed to sleep."
+    echo "  - Lid open, left alone: screen off after ${APPLIED_DISP} min; sleeps after the"
+    echo "    grace period. Using it again resets the timer."
+    echo "  - Lid shut WITH a monitor (clamshell): stays awake, no timer."
+    echo "  - Lid shut with NO monitor (closed, or monitor unplugged): stays awake the"
+    echo "    grace period, then sleeps. Opening the lid or reconnecting a monitor resets it."
+    echo "  - Keeping the Mac awake right now? ${awake_human}"
+    echo "  - A background helper re-checks every 60 seconds."
+    echo
+    echo "Check state anytime:   clamshell-keepawake status"
+    echo "Change the duration:   sudo clamshell-keepawake set <hours>"
+}
+
+cmd_install() {
+    need_root install
+    local HOURS="${1:-}" src
+    if [ -z "$HOURS" ]; then
+        if [ -e /dev/tty ]; then
+            printf 'Hours to stay awake before sleeping [%s]: ' "$DEFAULT_HOURS" > /dev/tty
+            read -r HOURS < /dev/tty || true
+        fi
+        HOURS="${HOURS:-$DEFAULT_HOURS}"
+    fi
+
+    # Resolve our own path so we can copy onto PATH (skip if already there).
+    case "$0" in
+        */*) src=$(cd "$(dirname "$0")" && pwd)/$(basename "$0") ;;
+        *)   src=$(command -v "$0") ;;
+    esac
+    install -d -m 755 /usr/local/bin
+    if [ "$src" != "$BIN" ]; then
+        install -m 755 -o root -g wheel "$src" "$BIN" || die "could not install ${BIN}"
+    fi
+
+    apply_duration "$HOURS"
+    write_plist
+    clear_state
+
+    launchctl bootout system "$PLIST" 2>/dev/null || true
+    launchctl bootstrap system "$PLIST" || die "launchctl bootstrap failed"
+
+    print_install_summary "$HOURS"
+}
+
+cmd_uninstall() {
+    need_root uninstall
+    launchctl bootout system "$PLIST" 2>/dev/null || true
+    rm -f "$PLIST" "$BIN"
+    clear_state
+    pmset -a disablesleep 0    # otherwise the Mac could stay awake until reboot
+    echo "Removed ${LABEL} and re-enabled normal sleep."
+    echo "Note: the sleep / disksleep / displaysleep timers set during install were"
+    echo "left as-is. Adjust them with pmset if you want, e.g. 'sudo pmset -a displaysleep 2'."
+}
+
+cmd_set() {
+    need_root "set <hours>"
+    local HOURS="${1:-}" hh was_paused=no
+    [ -n "$HOURS" ] || die "usage: sudo clamshell-keepawake set <hours>"
+    [ -f "$PLIST" ] || die "not installed yet -- run: sudo clamshell-keepawake install ${HOURS}"
+    [ -f "$PAUSED" ] && was_paused=yes      # note it before clear_state removes it
+    apply_duration "$HOURS"
+    clear_state                 # also cancels any active pause
+    cmd_tick                    # re-arm immediately instead of waiting up to 60s
+    hh=$(awk -v s="$APPLIED_HOLD" 'BEGIN{printf "%g", s/3600}')
+    if [ "$was_paused" = yes ]; then
+        echo "Resumed; grace period now ${hh} h (screen off after ${APPLIED_DISP} min)."
+    else
+        echo "Grace period set to ${hh} h (screen off after ${APPLIED_DISP} min)."
+    fi
+}
+
+# ---- pause / resume -------------------------------------------------------
+
+cmd_pause() {
+    need_root pause
+    local arg="${1:-}" secs until
+    [ -f "$PLIST" ] || die "not installed yet -- run: sudo clamshell-keepawake install"
+    if [ -z "$arg" ]; then
+        echo indefinite > "$PAUSED"
+        echo "Paused. Normal sleep is in effect until you run: clamshell-keepawake resume"
+    else
+        secs=$(parse_duration "$arg") || die "bad duration '${arg}' (try 30m, 2h, 90s)"
+        until=$(( $(date +%s) + secs ))
+        echo "$until" > "$PAUSED"
+        echo "Paused for $(fmt_dur "$secs") (until $(date -r "$until" +%H:%M)). Resume early: clamshell-keepawake resume"
+    fi
+    chmod 644 "$PAUSED"
+    cmd_tick                    # apply immediately (tick sees the pause file)
+}
+
+cmd_resume() {
+    need_root resume
+    if [ ! -f "$PAUSED" ]; then
+        echo "Not paused — nothing to resume."
+        return 0
+    fi
+    rm -f "$PAUSED"
+    cmd_tick                    # re-arm immediately
+    echo "Resumed. Keep-awake is active again."
+}
+
+# ---- status / logs --------------------------------------------------------
+
+# Best-effort phrase for how much longer the Mac will stay awake, mirroring the
+# decision _tick makes. Read-only; empty if there's no active countdown.
+awake_remaining() {
+    local now HOLD lid idle_ns idle since_open ext left
+    now=$(date +%s)
+    HOLD=$(hold_seconds)
+    lid=$(lid_state)
+    if [ "$lid" = open ]; then
+        idle_ns=$(ioreg -c IOHIDSystem | awk '/HIDIdleTime/ {print $NF; exit}')
+        idle=$(( ${idle_ns:-0} / 1000000000 ))
+        if [ -f "$OPEN_SINCE" ]; then
+            since_open=$(( now - $(cat "$OPEN_SINCE") ))
+            [ "$since_open" -lt "$idle" ] && idle=$since_open
+        fi
+        left=$(( HOLD - idle ))
+        [ "$left" -gt 0 ] && echo "sleeps in ~$(fmt_dur "$left") if left idle"
+    else
+        ext=$(system_profiler SPDisplaysDataType 2>/dev/null | grep -c "Resolution:" || true)
+        if [ "${ext:-0}" -gt 0 ]; then
+            echo "clamshell with monitor — no countdown"
+        elif [ -f "$CLOSED_SINCE" ]; then
+            left=$(( HOLD - ( now - $(cat "$CLOSED_SINCE") ) ))
+            [ "$left" -gt 0 ] && echo "sleeps in ~$(fmt_dur "$left")"
+        fi
+    fi
+}
+
+cmd_status() {
+    local hours now until left awake phrase
+    hours=$(awk -v s="$(hold_seconds)" 'BEGIN{printf "%g", s/3600}')
+    now=$(date +%s)
+
+    if [ -f "$PLIST" ]; then
+        echo "clamshell-keepawake: installed"
+    else
+        echo "clamshell-keepawake: not installed (run: sudo clamshell-keepawake install)"
+    fi
+    echo "  Grace period:  ${hours} h"
+    echo "  Lid:           $(lid_state)"
+
+    if [ -f "$PAUSED" ]; then
+        until=$(cat "$PAUSED" 2>/dev/null || echo indefinite)
+        if [ "$until" = indefinite ]; then
+            echo "  Paused:        yes (until you run 'resume')"
+        else
+            left=$(( until - now ))
+            if [ "$left" -gt 0 ]; then
+                echo "  Paused:        yes ($(fmt_dur "$left") left)"
+            else
+                echo "  Paused:        expiring on next check"
+            fi
+        fi
+    else
+        echo "  Paused:        no"
+    fi
+
+    awake=$(pmset -g 2>/dev/null | awk '/SleepDisabled/{print $2; exit}')
+    if [ "${awake:-0}" = 1 ]; then
+        phrase=$(awake_remaining)
+        if [ -n "$phrase" ]; then
+            echo "  Keeping awake: yes  (${phrase})"
+        else
+            echo "  Keeping awake: yes"
+        fi
+    else
+        echo "  Keeping awake: no (normal sleep in effect)"
+    fi
+}
+
+cmd_logs() {
+    [ -f "$LOG" ] || die "no log yet at ${LOG} (is it installed?)"
+    exec tail -f "$LOG"
+}
+
+# ---- usage / dispatch -----------------------------------------------------
+
+usage() {
+    cat <<EOF
+clamshell-keepawake — give your MacBook a grace period before it sleeps.
+
+Usage:
+  sudo clamshell-keepawake install [hours]   Install/enable (default ${DEFAULT_HOURS}h; prompts if omitted)
+  sudo clamshell-keepawake uninstall         Remove and re-enable normal sleep
+  sudo clamshell-keepawake set <hours>       Change the grace period (e.g. 1.5)
+  sudo clamshell-keepawake pause [dur]       Opt out until 'resume', or for a while (e.g. 30m, 2h)
+  sudo clamshell-keepawake resume            Cancel a pause
+       clamshell-keepawake status            Show current state
+       clamshell-keepawake logs              Follow the daemon log
+       clamshell-keepawake help              This help
+EOF
+}
+
+case "${1:-help}" in
+    install)        shift; cmd_install "$@" ;;
+    uninstall)      shift; cmd_uninstall "$@" ;;
+    set)            shift; cmd_set "$@" ;;
+    pause)          shift; cmd_pause "$@" ;;
+    resume)         shift; cmd_resume "$@" ;;
+    status)         shift; cmd_status "$@" ;;
+    logs)           shift; cmd_logs "$@" ;;
+    _tick)          cmd_tick ;;
+    help|-h|--help) usage ;;
+    *)              echo "unknown command: $1" >&2; usage; exit 1 ;;
+esac

@@ -8,6 +8,15 @@ external display, or when you unplug the monitor you were using in clamshell
 mode. `clamshell-keepawake` postpones that sleep by **3 hours**, then lets the
 Mac sleep normally — and the timer resets the moment you start using it again.
 
+Everything is driven by one command:
+
+```sh
+sudo clamshell-keepawake install     # enable it
+     clamshell-keepawake status      # see what it's doing
+sudo clamshell-keepawake pause 30m   # opt out for a bit
+sudo clamshell-keepawake uninstall   # remove it
+```
+
 ## What it does
 
 | Situation | Behavior |
@@ -23,8 +32,8 @@ tool only delays the sleeps that would have happened anyway.
 ## How it works
 
 A MacBook can only stay awake with the lid shut via `pmset disablesleep`; the
-common `caffeinate` trick can't stop lid-close sleep. A small root LaunchDaemon
-runs every 60 seconds and:
+common `caffeinate` trick can't stop lid-close sleep. Installing registers a
+root LaunchDaemon that runs `clamshell-keepawake _tick` every 60 seconds, which:
 
 - holds `disablesleep` on while a grace period is active — and keeps it pre-armed
   so closing the lid or unplugging a monitor can't race to sleep before the next
@@ -46,17 +55,55 @@ Install also sets `pmset sleep 180`, `disksleep 180`, and `displaysleep 10`.
 ```sh
 git clone https://github.com/<you>/clamshell-keepawake.git
 cd clamshell-keepawake
-sudo bash install.sh          # asks how many hours to stay awake (default 3)
+sudo ./clamshell-keepawake install        # asks how many hours to stay awake (default 3)
 # or set it directly:
-sudo bash install.sh 2        # stay awake 2 hours before sleeping (1.5 etc. allowed)
+sudo ./clamshell-keepawake install 2      # stay awake 2 hours before sleeping (1.5 etc. allowed)
 ```
 
+`install` copies the script to `/usr/local/bin/`, so afterwards you can run
+`clamshell-keepawake` from anywhere.
+
 > Run it in a real Terminal window so `sudo` can prompt for your password.
+
+## Usage
+
+| Command | Needs sudo | What it does |
+|---|---|---|
+| `clamshell-keepawake install [hours]` | yes | Install/enable. Prompts for hours if omitted (default 3). |
+| `clamshell-keepawake uninstall` | yes | Remove the daemon and re-enable normal sleep. |
+| `clamshell-keepawake set <hours>` | yes | Change the grace period (e.g. `1.5`). Re-arms immediately. |
+| `clamshell-keepawake pause [dur]` | yes | Opt out until `resume`, or for a while: `pause 30m`, `pause 2h`. |
+| `clamshell-keepawake resume` | yes | Cancel a pause. |
+| `clamshell-keepawake status` | no | Show daemon, grace period, lid, pause state, and time left. |
+| `clamshell-keepawake logs` | no | Follow the daemon log. |
+
+```text
+$ clamshell-keepawake status
+clamshell-keepawake: installed
+  Grace period:  3 h
+  Lid:           open
+  Paused:        no
+  Keeping awake: yes  (sleeps in ~2 h 14 m if left idle)
+```
+
+## Pause
+
+`pause` is the clean way to let your Mac sleep normally for a while without
+uninstalling — handy when you *want* it to sleep on lid-close:
+
+```sh
+sudo clamshell-keepawake pause       # until you run 'resume'
+sudo clamshell-keepawake pause 45m   # auto-resumes after 45 minutes
+sudo clamshell-keepawake resume      # cancel early
+```
+
+While paused, the daemon stops holding the Mac awake and macOS sleeps on its own
+schedule.
 
 ## Uninstall
 
 ```sh
-sudo bash uninstall.sh
+sudo clamshell-keepawake uninstall
 ```
 
 Removes the daemon and re-enables normal sleep. The `sleep` / `disksleep` /
@@ -65,13 +112,12 @@ like.
 
 ## Configuration
 
-- **Grace period (how long it stays awake)** — pass hours to the installer:
-  `sudo bash install.sh 1.5`. Re-run with a new number anytime; it updates the
-  daemon's config (`/usr/local/etc/clamshell-keepawake.conf`) and the matching
-  `pmset` timers together.
-- **Check interval** — `StartInterval` in `com.clamshellkeepawake.plist`.
-  Default `60` (seconds); also the timing resolution. Edit, then re-run the
-  installer.
+- **Grace period (how long it stays awake)** — `sudo clamshell-keepawake set 1.5`.
+  Updates the daemon's config (`/usr/local/etc/clamshell-keepawake.conf`) and the
+  matching `pmset` timers together, and re-arms right away.
+- **Check interval** — `StartInterval` (default `60` seconds) in the generated
+  `/Library/LaunchDaemons/com.clamshellkeepawake.plist`; this is also the timing
+  resolution. Edit it and re-run `sudo clamshell-keepawake install` to regenerate.
 - **Screen-off delay** — defaults to 10 min (or just under the grace period for
   very short durations). Change anytime with `sudo pmset -a displaysleep <min>`.
 
@@ -79,9 +125,10 @@ like.
 
 - **Manual sleep is blocked while a grace window is active.** Because
   `disablesleep` has to stay armed to catch a lid-close, the Apple menu's *Sleep*
-  and the power button won't sleep the Mac during a window. Force it with:
+  and the power button won't sleep the Mac during a window. The simplest fix is
+  to `pause` first:
   ```sh
-  sudo pmset -a disablesleep 0 && pmset sleepnow
+  sudo clamshell-keepawake pause && pmset sleepnow
   ```
 - All settings are system-wide and persist across reboots.
 - The 60-second poll makes timing accurate to within about a minute.
@@ -90,11 +137,11 @@ like.
 
 | File | Installed to |
 |---|---|
-| `clamshell-awake.sh` | `/usr/local/bin/` |
-| `com.clamshellkeepawake.plist` | `/Library/LaunchDaemons/` |
-| `install.sh` / `uninstall.sh` | (run from the repo) |
+| `clamshell-keepawake` | `/usr/local/bin/` |
+| `com.clamshellkeepawake.plist` (generated by `install`) | `/Library/LaunchDaemons/` |
+| config | `/usr/local/etc/clamshell-keepawake.conf` |
 
-Logs go to `/var/log/clamshell-awake.log`.
+Logs go to `/var/log/clamshell-keepawake.log`.
 
 ## License
 
