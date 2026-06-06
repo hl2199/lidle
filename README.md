@@ -71,7 +71,7 @@ sudo ./clamshell-keepawake install 2      # stay awake 2 hours before sleeping (
 |---|---|---|
 | `clamshell-keepawake install [hours]` | yes | Install/enable. Prompts for hours if omitted (default 3). |
 | `clamshell-keepawake uninstall` | yes | Remove the daemon and re-enable normal sleep. |
-| `clamshell-keepawake set <hours>` | yes | Change the grace period (e.g. `1.5`). Re-arms immediately. |
+| `clamshell-keepawake set <hours>` | yes | Change the grace period (e.g. `1.5`). Re-arms immediately; if paused, resumes with the new time. |
 | `clamshell-keepawake pause [dur]` | yes | Opt out until `resume`, or for a while: `pause 30m`, `pause 2h`. |
 | `clamshell-keepawake resume` | yes | Cancel a pause. |
 | `clamshell-keepawake status` | no | Show daemon, grace period, lid, pause state, and time left. |
@@ -99,6 +99,50 @@ sudo clamshell-keepawake resume      # cancel early
 
 While paused, the daemon stops holding the Mac awake and macOS sleeps on its own
 schedule.
+
+## Menu bar (SwiftBar)
+
+Prefer a menu bar item over the terminal? `clamshell-keepawake` ships a
+[SwiftBar](https://swiftbar.app) menu that shows the current state and gives you
+one-click pause/resume and grace-period controls.
+
+1. Install SwiftBar (`brew install --cask swiftbar`) and, on first launch, pick a
+   Plugin Folder.
+2. Add the menu item:
+   ```sh
+   sudo clamshell-keepawake menu-setup
+   ```
+
+This drops a tiny SwiftBar plugin (calling `clamshell-keepawake menu`) into your
+plugin folder, and installs a **scoped, passwordless `sudo` rule** so the
+Pause / Resume / Set actions act instantly. The rule
+(`/etc/sudoers.d/clamshell-keepawake`) lets your user run **only**
+`clamshell-keepawake pause`, `resume`, and `set <hours>` without a password —
+nothing else.
+
+The menu shows:
+
+```
+☀ 2h14m
+──────────────────────────────
+Active
+Grace period: 3 h
+Sleeps in ~2h 14m
+──────────────────────────────
+Pause                 (toggles to Resume when paused)
+Set grace period ▸ 1h / 2h / 3h / 4h / Custom…
+──────────────────────────────
+Open log
+Refresh
+```
+
+Remove just the menu (leaving the core tool installed):
+
+```sh
+sudo clamshell-keepawake menu-remove
+```
+
+`uninstall` also removes the menu plugin and sudo rule automatically.
 
 ## Uninstall
 

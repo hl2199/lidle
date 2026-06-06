@@ -30,6 +30,8 @@ OPEN_SINCE="/var/run/clamshell-keepawake.open-since"
 DONE="/var/run/clamshell-keepawake.done"
 PREV_LID="/var/run/clamshell-keepawake.prev-lid"
 PAUSED="/var/run/clamshell-keepawake.paused"
+SUDOERS="/etc/sudoers.d/clamshell-keepawake"
+PLUGIN_NAME="clamshell-keepawake.5s.sh"
 
 DEFAULT_HOURS=3
 
@@ -80,6 +82,36 @@ lid_state() {
         echo closed
     else
         echo open
+    fi
+}
+
+# Count connected external displays (meaningful when the lid is shut).
+external_count() {
+    system_profiler SPDisplaysDataType 2>/dev/null | grep -c "Resolution:" || true
+}
+
+# Seconds until the Mac may sleep given the current state, or empty when there
+# is no active countdown (clamshell+monitor, grace already elapsed, etc.).
+# Mirrors the decision cmd_tick makes; read-only.
+remaining_seconds() {
+    local now HOLD lid idle_ns idle since_open left
+    now=$(date +%s)
+    HOLD=$(hold_seconds)
+    lid=$(lid_state)
+    if [ "$lid" = open ]; then
+        idle_ns=$(ioreg -c IOHIDSystem | awk '/HIDIdleTime/ {print $NF; exit}')
+        idle=$(( ${idle_ns:-0} / 1000000000 ))
+        if [ -f "$OPEN_SINCE" ]; then
+            since_open=$(( now - $(cat "$OPEN_SINCE") ))
+            [ "$since_open" -lt "$idle" ] && idle=$since_open
+        fi
+        left=$(( HOLD - idle ))
+        [ "$left" -gt 0 ] && echo "$left"
+    elif [ "$(external_count)" -gt 0 ]; then
+        :   # clamshell with monitor: no countdown
+    elif [ -f "$CLOSED_SINCE" ]; then
+        left=$(( HOLD - ( now - $(cat "$CLOSED_SINCE") ) ))
+        [ "$left" -gt 0 ] && echo "$left"
     fi
 }
 
@@ -267,6 +299,15 @@ cmd_uninstall() {
     launchctl bootout system "$PLIST" 2>/dev/null || true
     rm -f "$PLIST" "$BIN"
     clear_state
+
+    # Remove menu artifacts if menu-setup was ever run.
+    rm -f "$SUDOERS"
+    local mu_user="${SUDO_USER:-}" mu_dir
+    if [ -n "$mu_user" ]; then
+        mu_dir=$(swiftbar_plugin_dir "$mu_user")
+        [ -n "$mu_dir" ] && rm -f "$mu_dir/$PLUGIN_NAME"
+    fi
+
     pmset -a disablesleep 0    # otherwise the Mac could stay awake until reboot
     echo "Removed ${LABEL} and re-enabled normal sleep."
     echo "Note: the sleep / disksleep / displaysleep timers set during install were"
@@ -322,30 +363,19 @@ cmd_resume() {
 
 # ---- status / logs --------------------------------------------------------
 
-# Best-effort phrase for how much longer the Mac will stay awake, mirroring the
-# decision _tick makes. Read-only; empty if there's no active countdown.
+# Best-effort phrase for how much longer the Mac will stay awake (used by
+# status). Builds on remaining_seconds so status/title/menu agree.
 awake_remaining() {
-    local now HOLD lid idle_ns idle since_open ext left
-    now=$(date +%s)
-    HOLD=$(hold_seconds)
-    lid=$(lid_state)
-    if [ "$lid" = open ]; then
-        idle_ns=$(ioreg -c IOHIDSystem | awk '/HIDIdleTime/ {print $NF; exit}')
-        idle=$(( ${idle_ns:-0} / 1000000000 ))
-        if [ -f "$OPEN_SINCE" ]; then
-            since_open=$(( now - $(cat "$OPEN_SINCE") ))
-            [ "$since_open" -lt "$idle" ] && idle=$since_open
+    local secs
+    secs=$(remaining_seconds)
+    if [ -n "$secs" ]; then
+        if [ "$(lid_state)" = open ]; then
+            echo "sleeps in ~$(fmt_dur "$secs") if left idle"
+        else
+            echo "sleeps in ~$(fmt_dur "$secs")"
         fi
-        left=$(( HOLD - idle ))
-        [ "$left" -gt 0 ] && echo "sleeps in ~$(fmt_dur "$left") if left idle"
-    else
-        ext=$(system_profiler SPDisplaysDataType 2>/dev/null | grep -c "Resolution:" || true)
-        if [ "${ext:-0}" -gt 0 ]; then
-            echo "clamshell with monitor — no countdown"
-        elif [ -f "$CLOSED_SINCE" ]; then
-            left=$(( HOLD - ( now - $(cat "$CLOSED_SINCE") ) ))
-            [ "$left" -gt 0 ] && echo "sleeps in ~$(fmt_dur "$left")"
-        fi
+    elif [ "$(lid_state)" != open ] && [ "$(external_count)" -gt 0 ]; then
+        echo "clamshell with monitor — no countdown"
     fi
 }
 
@@ -391,6 +421,145 @@ cmd_status() {
     fi
 }
 
+# Emit a SwiftBar menu: title line, then ---, then info + action lines.
+# Read-only (no root). Action items shell out to sudo clamshell-keepawake ...,
+# made prompt-free by the sudoers drop-in that menu-setup installs.
+cmd_menu() {
+    local secs paused awake
+
+    if [ ! -f "$PLIST" ]; then
+        echo "☀ –"
+        echo "---"
+        echo "Not installed"
+        echo "Run: sudo clamshell-keepawake install"
+        return 0
+    fi
+
+    [ -f "$PAUSED" ] && paused=yes || paused=no
+    secs=$(remaining_seconds)
+    awake=$(pmset -g 2>/dev/null | awk '/SleepDisabled/{print $2; exit}')
+
+    # ---- Title ----
+    if [ "$paused" = yes ]; then
+        echo "⏸ paused"
+    elif [ -n "$secs" ]; then
+        echo "☀ $(fmt_dur "$secs" | tr -d ' ')"     # compact for the menu bar
+    elif [ "${awake:-0}" = 1 ]; then
+        echo "☀ on"
+    else
+        echo "☀ off"
+    fi
+    echo "---"
+
+    # ---- Info ----
+    if [ "$paused" = yes ]; then
+        echo "Paused"
+    else
+        echo "Active"
+    fi
+    echo "Grace period: $(awk -v s="$(hold_seconds)" 'BEGIN{printf "%g", s/3600}') h"
+    if [ "$paused" = no ] && [ -n "$secs" ]; then
+        echo "Sleeps in ~$(fmt_dur "$secs")"
+    fi
+    echo "---"
+
+    # ---- Pause/Resume toggle ----
+    if [ "$paused" = yes ]; then
+        echo "Resume | bash=/usr/bin/sudo param1=$BIN param2=resume terminal=false refresh=true"
+    else
+        echo "Pause | bash=/usr/bin/sudo param1=$BIN param2=pause terminal=false refresh=true"
+    fi
+
+    # ---- Set grace period submenu ----
+    echo "Set grace period"
+    echo "--1 hour | bash=/usr/bin/sudo param1=$BIN param2=set param3=1 terminal=false refresh=true"
+    echo "--2 hours | bash=/usr/bin/sudo param1=$BIN param2=set param3=2 terminal=false refresh=true"
+    echo "--3 hours | bash=/usr/bin/sudo param1=$BIN param2=set param3=3 terminal=false refresh=true"
+    echo "--4 hours | bash=/usr/bin/sudo param1=$BIN param2=set param3=4 terminal=false refresh=true"
+    echo "--Custom… | bash=$BIN param1=set-prompt terminal=false refresh=true"
+    echo "---"
+
+    # ---- Footer ----
+    echo "Open log | bash=/usr/bin/open param1=$LOG terminal=false"
+    echo "Refresh | refresh=true"
+}
+
+# Custom… menu action: prompt for hours, then apply via sudo set.
+# Runs as the user (SwiftBar); sudo is prompt-free via the menu sudoers rule.
+cmd_set_prompt() {
+    local hours
+    hours=$(osascript -e 'set h to text returned of (display dialog "Hours to stay awake before sleeping:" default answer "3" with title "clamshell-keepawake")' 2>/dev/null) || return 0
+    [ -n "$hours" ] || return 0
+    sudo "$BIN" set "$hours"
+}
+
+# ---- menu setup / teardown ------------------------------------------------
+
+# Write the scoped, passwordless sudoers rule for the menu's three actions.
+# Validated with visudo before being moved into place (a bad sudoers file can
+# break sudo system-wide).
+write_sudoers() {
+    local user="$1" tmp
+    tmp=$(mktemp) || die "mktemp failed"
+    printf '%s ALL=(root) NOPASSWD: %s pause, %s resume, %s set *\n' \
+        "$user" "$BIN" "$BIN" "$BIN" > "$tmp"
+    if visudo -cf "$tmp" >/dev/null 2>&1; then
+        install -m 0440 -o root -g wheel "$tmp" "$SUDOERS"
+        rm -f "$tmp"
+    else
+        rm -f "$tmp"
+        die "generated sudoers content failed validation; not installing"
+    fi
+}
+
+# SwiftBar's configured plugin folder, read as the target user.
+swiftbar_plugin_dir() {
+    sudo -u "$1" defaults read com.ameba.SwiftBar PluginDirectory 2>/dev/null
+}
+
+# Generate the thin SwiftBar plugin (calls our menu subcommand).
+write_plugin() {
+    local dir="$1" user="$2" path
+    path="$dir/$PLUGIN_NAME"
+    printf '#!/bin/bash\nexec %s menu\n' "$BIN" > "$path"
+    chmod 0755 "$path"
+    chown "$user" "$path"
+}
+
+cmd_menu_setup() {
+    need_root menu-setup
+    local user="${SUDO_USER:-}" dir
+    [ -n "$user" ] || die "run via sudo from your user account (need \$SUDO_USER to scope the sudoers rule)"
+    [ -f "$PLIST" ] || die "install first: sudo clamshell-keepawake install"
+
+    write_sudoers "$user"
+    echo "Installed passwordless sudo rule for ${user} (pause / resume / set)."
+
+    dir=$(swiftbar_plugin_dir "$user")
+    if [ -z "$dir" ] || [ ! -d "$dir" ]; then
+        echo "SwiftBar plugin folder not found."
+        echo "Install SwiftBar (https://swiftbar.app), set its Plugin Folder, then re-run:"
+        echo "  sudo clamshell-keepawake menu-setup"
+        return 0
+    fi
+    write_plugin "$dir" "$user"
+    sudo -u "$user" open -g "swiftbar://refreshallplugins" 2>/dev/null || true
+    echo "Installed SwiftBar plugin to ${dir}/${PLUGIN_NAME}."
+    echo "The clamshell-keepawake item should appear in your menu bar."
+}
+
+cmd_menu_remove() {
+    need_root menu-remove
+    local user="${SUDO_USER:-}" dir
+    rm -f "$SUDOERS"
+    if [ -n "$user" ]; then
+        dir=$(swiftbar_plugin_dir "$user")
+        [ -n "$dir" ] && rm -f "$dir/$PLUGIN_NAME"
+        sudo -u "$user" open -g "swiftbar://refreshallplugins" 2>/dev/null || true
+    fi
+    echo "Removed the menu sudo rule and SwiftBar plugin."
+}
+
 cmd_logs() {
     [ -f "$LOG" ] || die "no log yet at ${LOG} (is it installed?)"
     exec tail -f "$LOG"
@@ -406,6 +575,8 @@ Usage:
   sudo clamshell-keepawake install [hours]   Install/enable (default ${DEFAULT_HOURS}h; prompts if omitted)
   sudo clamshell-keepawake uninstall         Remove and re-enable normal sleep
   sudo clamshell-keepawake set <hours>       Change the grace period (e.g. 1.5)
+  sudo clamshell-keepawake menu-setup        Add the SwiftBar menu bar item (+ passwordless sudo for it)
+  sudo clamshell-keepawake menu-remove       Remove the menu bar item and its sudo rule
   sudo clamshell-keepawake pause [dur]       Opt out until 'resume', or for a while (e.g. 30m, 2h)
   sudo clamshell-keepawake resume            Cancel a pause
        clamshell-keepawake status            Show current state
@@ -421,6 +592,10 @@ case "${1:-help}" in
     pause)          shift; cmd_pause "$@" ;;
     resume)         shift; cmd_resume "$@" ;;
     status)         shift; cmd_status "$@" ;;
+    menu)           cmd_menu ;;
+    set-prompt)     cmd_set_prompt ;;
+    menu-setup)     cmd_menu_setup ;;
+    menu-remove)    cmd_menu_remove ;;
     logs)           shift; cmd_logs "$@" ;;
     _tick)          cmd_tick ;;
     help|-h|--help) usage ;;
