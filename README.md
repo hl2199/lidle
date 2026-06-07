@@ -121,6 +121,13 @@ Pause / Resume / Set actions act instantly. The rule
 `clamshell-keepawake pause`, `resume`, and `set <hours>` without a password —
 nothing else.
 
+It also installs a per-user **LaunchAgent**
+(`~/Library/LaunchAgents/com.clamshellkeepawake.menu.plist`) that starts SwiftBar
+at login, so the menu is present after every reboot — no need to toggle SwiftBar's
+own "Launch at Login." (The keep-awake daemon runs as a root *LaunchDaemon* and
+can't launch GUI apps into your session; the menu autostart has to be a
+*LaunchAgent* in your login session, which is what this sets up.)
+
 The menu-bar icon is **☀** (holding the Mac awake) or **🌙** (not holding —
 off, idle, or paused). The dropdown shows:
 
@@ -151,7 +158,8 @@ Remove just the menu (leaving the core tool installed):
 sudo clamshell-keepawake menu-remove
 ```
 
-`uninstall` also removes the menu plugin and sudo rule automatically.
+`uninstall` (and `quit`) also remove the menu plugin, sudo rule, and login agent
+automatically.
 
 ## Uninstall
 

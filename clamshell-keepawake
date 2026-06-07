@@ -32,6 +32,7 @@ PREV_LID="/var/run/clamshell-keepawake.prev-lid"
 PAUSED="/var/run/clamshell-keepawake.paused"
 SUDOERS="/etc/sudoers.d/clamshell-keepawake"
 PLUGIN_NAME="clamshell-keepawake.5s.sh"
+AGENT_LABEL="com.clamshellkeepawake.menu"
 
 DEFAULT_HOURS=3
 
@@ -310,16 +311,10 @@ teardown() {
     rm -f "$PLIST"
     clear_state
 
-    # Remove menu artifacts (sudoers rule + SwiftBar plugin) if menu-setup ran.
-    # No SwiftBar refresh here: deleting the plugin file is enough (SwiftBar
-    # watches the folder), and a refresh URL would pop SwiftBar to the front.
-    rm -f "$SUDOERS"
-    local user dir
-    user=$(target_user)
-    if [ -n "$user" ]; then
-        dir=$(swiftbar_plugin_dir "$user")
-        [ -n "$dir" ] && rm -f "$dir/$PLUGIN_NAME"
-    fi
+    # Remove menu artifacts (sudoers rule, SwiftBar plugin, login agent) if
+    # menu-setup ran. No SwiftBar refresh URL here: deleting the plugin file is
+    # enough (SwiftBar watches the folder) and a refresh URL would pop it forward.
+    remove_menu_artifacts "$(target_user)"
 
     pmset -a disablesleep 0    # restore normal sleep
 }
@@ -557,6 +552,64 @@ PLUGIN
     chown "$user" "$path"
 }
 
+# A user's home directory (we run as root, so we can't rely on $HOME).
+user_home() {
+    dscl . -read "/Users/$1" NFSHomeDirectory 2>/dev/null | awk '{print $NF}'
+}
+
+# Install a per-user LaunchAgent that starts SwiftBar at login, so the menu is
+# present across reboots. The root keep-awake daemon can't do this (daemons have
+# no GUI session); a LaunchAgent runs in the user's session. The plist lives in
+# ~/Library/LaunchAgents (auto-loaded at login); we also bootstrap it now.
+install_menu_agent() {
+    local user="$1" home uid plist
+    home=$(user_home "$user"); [ -n "$home" ] || return 0
+    uid=$(id -u "$user" 2>/dev/null) || return 0
+    sudo -u "$user" mkdir -p "$home/Library/LaunchAgents"
+    plist="$home/Library/LaunchAgents/${AGENT_LABEL}.plist"
+    cat > "$plist" <<AGENT
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>${AGENT_LABEL}</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/usr/bin/open</string>
+        <string>-g</string>
+        <string>-a</string>
+        <string>SwiftBar</string>
+    </array>
+    <key>RunAtLoad</key>
+    <true/>
+</dict>
+</plist>
+AGENT
+    chown "$user" "$plist"
+    launchctl bootout "gui/$uid" "$plist" 2>/dev/null || true
+    launchctl bootstrap "gui/$uid" "$plist" 2>/dev/null || true
+}
+
+remove_menu_agent() {
+    local user="$1" home uid plist
+    home=$(user_home "$user"); [ -n "$home" ] || return 0
+    uid=$(id -u "$user" 2>/dev/null) || return 0
+    plist="$home/Library/LaunchAgents/${AGENT_LABEL}.plist"
+    launchctl bootout "gui/$uid" "$plist" 2>/dev/null || true
+    rm -f "$plist"
+}
+
+# Remove all menu artifacts for a user: sudoers rule, SwiftBar plugin, login agent.
+remove_menu_artifacts() {
+    local user="$1" dir
+    rm -f "$SUDOERS"
+    [ -n "$user" ] || return 0
+    dir=$(swiftbar_plugin_dir "$user")
+    [ -n "$dir" ] && rm -f "$dir/$PLUGIN_NAME"
+    remove_menu_agent "$user"
+}
+
 cmd_menu_setup() {
     need_root menu-setup
     local user dir
@@ -575,22 +628,16 @@ cmd_menu_setup() {
         return 0
     fi
     write_plugin "$dir" "$user"
-    sudo -u "$user" open -g -a SwiftBar 2>/dev/null || true   # ensure SwiftBar is running
+    install_menu_agent "$user"                                # auto-start SwiftBar at login
+    sudo -u "$user" open -g -a SwiftBar 2>/dev/null || true   # ensure SwiftBar is running now
     echo "Installed SwiftBar plugin to ${dir}/${PLUGIN_NAME}."
-    echo "The clamshell-keepawake item should appear in your menu bar."
+    echo "The menu item will appear now and at every login."
 }
 
 cmd_menu_remove() {
     need_root menu-remove
-    local user dir
-    user=$(target_user)
-    rm -f "$SUDOERS"
-    if [ -n "$user" ]; then
-        dir=$(swiftbar_plugin_dir "$user")
-        [ -n "$dir" ] && rm -f "$dir/$PLUGIN_NAME"
-        sudo -u "$user" open -g "swiftbar://refreshallplugins" 2>/dev/null || true
-    fi
-    echo "Removed the menu sudo rule and SwiftBar plugin."
+    remove_menu_artifacts "$(target_user)"
+    echo "Removed the menu sudo rule, SwiftBar plugin, and login agent."
 }
 
 cmd_logs() {
