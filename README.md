@@ -71,6 +71,7 @@ sudo ./clamshell-keepawake install 2      # stay awake 2 hours before sleeping (
 |---|---|---|
 | `clamshell-keepawake install [hours]` | yes | Install/enable. Prompts for hours if omitted (default 3). |
 | `clamshell-keepawake uninstall` | yes | Remove the daemon and re-enable normal sleep. |
+| `clamshell-keepawake quit` | yes | Stop the daemon and restore normal sleep, but keep it installed (re-enable with `install`). |
 | `clamshell-keepawake set <hours>` | yes | Change the grace period (e.g. `1.5`). Re-arms immediately; if paused, resumes with the new time. |
 | `clamshell-keepawake pause [dur]` | yes | Opt out until `resume`, or for a while: `pause 30m`, `pause 2h`. |
 | `clamshell-keepawake resume` | yes | Cancel a pause. |
@@ -120,21 +121,29 @@ Pause / Resume / Set actions act instantly. The rule
 `clamshell-keepawake pause`, `resume`, and `set <hours>` without a password —
 nothing else.
 
-The menu shows:
+The menu-bar icon is **☀** (holding the Mac awake) or **🌙** (not holding —
+off, idle, or paused). The dropdown shows:
 
 ```
-☀ 2h14m
+☀
 ──────────────────────────────
 Active
 Grace period: 3 h
-Sleeps in ~2h 14m
 ──────────────────────────────
 Pause                 (toggles to Resume when paused)
 Set grace period ▸ 1h / 2h / 3h / 4h / Custom…
 ──────────────────────────────
 Open log
 Refresh
+──────────────────────────────
+Quit                  (stop everything, restore normal sleep)
 ```
+
+**Quit** stops the daemon (so it won't restart on reboot), sets
+`disablesleep 0`, and removes the menu item — but keeps the `clamshell-keepawake`
+command, so you can switch it back on with `install`. It does *not* restore the
+`sleep`/`displaysleep` timers install set; adjust display-off in System
+Settings → Lock Screen if you want.
 
 Remove just the menu (leaving the core tool installed):
 

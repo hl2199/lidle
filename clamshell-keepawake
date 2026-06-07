@@ -43,6 +43,13 @@ need_root() {
     [ "$(id -u)" -eq 0 ] || die "this command needs root. Re-run: sudo clamshell-keepawake ${1:-<cmd>}"
 }
 
+# The GUI user to scope per-user actions to. Uses $SUDO_USER when run via sudo,
+# else the current console user (so it also works when launched as root by the
+# Spotlight app via osascript, where $SUDO_USER is unset).
+target_user() {
+    echo "${SUDO_USER:-$(stat -f%Su /dev/console 2>/dev/null)}"
+}
+
 # Seconds -> "2 h 14 m" / "45 m" / "30 s".
 fmt_dur() {
     local s="$1" h m
@@ -267,7 +274,9 @@ cmd_install() {
     need_root install
     local HOURS="${1:-}" src
     if [ -z "$HOURS" ]; then
-        if [ -e /dev/tty ]; then
+        if [ -r "$CONF" ]; then
+            HOURS=$(awk -v s="$(hold_seconds)" 'BEGIN{printf "%g", s/3600}')   # reuse existing grace
+        elif [ -e /dev/tty ]; then
             printf 'Hours to stay awake before sleeping [%s]: ' "$DEFAULT_HOURS" > /dev/tty
             read -r HOURS < /dev/tty || true
         fi
@@ -294,24 +303,42 @@ cmd_install() {
     print_install_summary "$HOURS"
 }
 
-cmd_uninstall() {
-    need_root uninstall
+# Stop the daemon, remove its plist + state + menu artifacts, and restore normal
+# sleep. Shared by quit and uninstall.
+teardown() {
     launchctl bootout system "$PLIST" 2>/dev/null || true
-    rm -f "$PLIST" "$BIN"
+    rm -f "$PLIST"
     clear_state
 
-    # Remove menu artifacts if menu-setup was ever run.
+    # Remove menu artifacts (sudoers rule + SwiftBar plugin) if menu-setup ran.
+    # No SwiftBar refresh here: deleting the plugin file is enough (SwiftBar
+    # watches the folder), and a refresh URL would pop SwiftBar to the front.
     rm -f "$SUDOERS"
-    local mu_user="${SUDO_USER:-}" mu_dir
-    if [ -n "$mu_user" ]; then
-        mu_dir=$(swiftbar_plugin_dir "$mu_user")
-        [ -n "$mu_dir" ] && rm -f "$mu_dir/$PLUGIN_NAME"
+    local user dir
+    user=$(target_user)
+    if [ -n "$user" ]; then
+        dir=$(swiftbar_plugin_dir "$user")
+        [ -n "$dir" ] && rm -f "$dir/$PLUGIN_NAME"
     fi
 
-    pmset -a disablesleep 0    # otherwise the Mac could stay awake until reboot
+    pmset -a disablesleep 0    # restore normal sleep
+}
+
+cmd_uninstall() {
+    need_root uninstall
+    teardown
+    rm -f "$BIN"
     echo "Removed ${LABEL} and re-enabled normal sleep."
     echo "Note: the sleep / disksleep / displaysleep timers set during install were"
-    echo "left as-is. Adjust them with pmset if you want, e.g. 'sudo pmset -a displaysleep 2'."
+    echo "left as-is. Set display-off in System Settings > Lock Screen, or use pmset."
+}
+
+# Stop everything but keep the binary installed (re-enable later with install).
+cmd_quit() {
+    need_root quit
+    teardown
+    echo "clamshell-keepawake stopped; normal sleep restored."
+    echo "Still installed — re-enable anytime with: sudo clamshell-keepawake install"
 }
 
 cmd_set() {
@@ -425,10 +452,10 @@ cmd_status() {
 # Read-only (no root). Action items shell out to sudo clamshell-keepawake ...,
 # made prompt-free by the sudoers drop-in that menu-setup installs.
 cmd_menu() {
-    local secs paused awake
+    local paused awake
 
     if [ ! -f "$PLIST" ]; then
-        echo "☀ –"
+        echo "⚠️"
         echo "---"
         echo "Not installed"
         echo "Run: sudo clamshell-keepawake install"
@@ -436,18 +463,13 @@ cmd_menu() {
     fi
 
     [ -f "$PAUSED" ] && paused=yes || paused=no
-    secs=$(remaining_seconds)
     awake=$(pmset -g 2>/dev/null | awk '/SleepDisabled/{print $2; exit}')
 
-    # ---- Title ----
-    if [ "$paused" = yes ]; then
-        echo "⏸ paused"
-    elif [ -n "$secs" ]; then
-        echo "☀ $(fmt_dur "$secs" | tr -d ' ')"     # compact for the menu bar
-    elif [ "${awake:-0}" = 1 ]; then
-        echo "☀ on"
+    # ---- Title (icon only): sun = holding awake, moon = not (off or paused) ----
+    if [ "${awake:-0}" = 1 ] && [ "$paused" = no ]; then
+        echo "☀"
     else
-        echo "☀ off"
+        echo "🌙"
     fi
     echo "---"
 
@@ -458,9 +480,6 @@ cmd_menu() {
         echo "Active"
     fi
     echo "Grace period: $(awk -v s="$(hold_seconds)" 'BEGIN{printf "%g", s/3600}') h"
-    if [ "$paused" = no ] && [ -n "$secs" ]; then
-        echo "Sleeps in ~$(fmt_dur "$secs")"
-    fi
     echo "---"
 
     # ---- Pause/Resume toggle ----
@@ -482,6 +501,8 @@ cmd_menu() {
     # ---- Footer ----
     echo "Open log | bash=/usr/bin/open param1=$LOG terminal=false"
     echo "Refresh | refresh=true"
+    echo "---"
+    echo "Quit clamshell-keepawake | bash=/usr/bin/sudo param1=$BIN param2=quit terminal=false"
 }
 
 # Custom… menu action: prompt for hours, then apply via sudo set.
@@ -501,8 +522,8 @@ cmd_set_prompt() {
 write_sudoers() {
     local user="$1" tmp
     tmp=$(mktemp) || die "mktemp failed"
-    printf '%s ALL=(root) NOPASSWD: %s pause, %s resume, %s set *\n' \
-        "$user" "$BIN" "$BIN" "$BIN" > "$tmp"
+    printf '%s ALL=(root) NOPASSWD: %s pause, %s resume, %s set *, %s quit\n' \
+        "$user" "$BIN" "$BIN" "$BIN" "$BIN" > "$tmp"
     if visudo -cf "$tmp" >/dev/null 2>&1; then
         install -m 0440 -o root -g wheel "$tmp" "$SUDOERS"
         rm -f "$tmp"
@@ -517,19 +538,30 @@ swiftbar_plugin_dir() {
     sudo -u "$1" defaults read com.ameba.SwiftBar PluginDirectory 2>/dev/null
 }
 
-# Generate the thin SwiftBar plugin (calls our menu subcommand).
+# Generate the thin SwiftBar plugin (calls our menu subcommand). The metadata
+# comments hide SwiftBar's own footer items (its menu section, About, Run in
+# Terminal, Last Updated, Disable Plugin) for a clean dropdown.
 write_plugin() {
     local dir="$1" user="$2" path
     path="$dir/$PLUGIN_NAME"
-    printf '#!/bin/bash\nexec %s menu\n' "$BIN" > "$path"
+    cat > "$path" <<PLUGIN
+#!/bin/bash
+# <swiftbar.hideAbout>true</swiftbar.hideAbout>
+# <swiftbar.hideRunInTerminal>true</swiftbar.hideRunInTerminal>
+# <swiftbar.hideLastUpdated>true</swiftbar.hideLastUpdated>
+# <swiftbar.hideDisablePlugin>true</swiftbar.hideDisablePlugin>
+# <swiftbar.hideSwiftBar>true</swiftbar.hideSwiftBar>
+exec ${BIN} menu
+PLUGIN
     chmod 0755 "$path"
     chown "$user" "$path"
 }
 
 cmd_menu_setup() {
     need_root menu-setup
-    local user="${SUDO_USER:-}" dir
-    [ -n "$user" ] || die "run via sudo from your user account (need \$SUDO_USER to scope the sudoers rule)"
+    local user dir
+    user=$(target_user)
+    [ -n "$user" ] || die "couldn't determine your user account to scope the sudoers rule"
     [ -f "$PLIST" ] || die "install first: sudo clamshell-keepawake install"
 
     write_sudoers "$user"
@@ -543,14 +575,15 @@ cmd_menu_setup() {
         return 0
     fi
     write_plugin "$dir" "$user"
-    sudo -u "$user" open -g "swiftbar://refreshallplugins" 2>/dev/null || true
+    sudo -u "$user" open -g -a SwiftBar 2>/dev/null || true   # ensure SwiftBar is running
     echo "Installed SwiftBar plugin to ${dir}/${PLUGIN_NAME}."
     echo "The clamshell-keepawake item should appear in your menu bar."
 }
 
 cmd_menu_remove() {
     need_root menu-remove
-    local user="${SUDO_USER:-}" dir
+    local user dir
+    user=$(target_user)
     rm -f "$SUDOERS"
     if [ -n "$user" ]; then
         dir=$(swiftbar_plugin_dir "$user")
@@ -574,6 +607,7 @@ clamshell-keepawake — give your MacBook a grace period before it sleeps.
 Usage:
   sudo clamshell-keepawake install [hours]   Install/enable (default ${DEFAULT_HOURS}h; prompts if omitted)
   sudo clamshell-keepawake uninstall         Remove and re-enable normal sleep
+  sudo clamshell-keepawake quit              Stop everything + restore sleep, but keep it installed
   sudo clamshell-keepawake set <hours>       Change the grace period (e.g. 1.5)
   sudo clamshell-keepawake menu-setup        Add the SwiftBar menu bar item (+ passwordless sudo for it)
   sudo clamshell-keepawake menu-remove       Remove the menu bar item and its sudo rule
@@ -588,6 +622,7 @@ EOF
 case "${1:-help}" in
     install)        shift; cmd_install "$@" ;;
     uninstall)      shift; cmd_uninstall "$@" ;;
+    quit)           cmd_quit ;;
     set)            shift; cmd_set "$@" ;;
     pause)          shift; cmd_pause "$@" ;;
     resume)         shift; cmd_resume "$@" ;;
