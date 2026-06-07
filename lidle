@@ -4,7 +4,7 @@
 # One command for the whole lifecycle. The hidden `_tick` subcommand is what the
 # LaunchDaemon runs every 60s; everything else is for humans:
 #
-#   sudo lidle install [hours]   install/enable (default 3h)
+#   sudo lidle install [hours]   install/enable (prompts for hours)
 #   sudo lidle uninstall         remove, re-enable normal sleep
 #   sudo lidle set <hours>       change the awake window
 #   sudo lidle pause [dur]       opt out (until 'resume', or e.g. 30m)
@@ -36,7 +36,6 @@ SUDOERS="/etc/sudoers.d/lidle"
 PLUGIN_NAME="lidle.5s.sh"
 AGENT_LABEL="com.lidle.menu"
 
-DEFAULT_HOURS=3
 VERSION="1.0.0"
 
 # ---- small helpers --------------------------------------------------------
@@ -94,19 +93,20 @@ log_mode() {
     printf '%s  %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$2" >> "$LOG"
 }
 
-# Current awake window in seconds, or the literal "indefinite" (conf overrides
-# the built-in default).
+# Current awake window from the config: seconds, the literal "indefinite", or
+# empty when unconfigured (there is no built-in default — it's set at install).
 hold_seconds() {
-    local HOLD=$(( DEFAULT_HOURS * 3600 ))
+    local HOLD=""
     [ -r "$CONF" ] && . "$CONF"
     echo "$HOLD"
 }
 
-# Awake window for display: "indefinite" or e.g. "3 h".
+# Awake window for display: "not set", "indefinite", or e.g. "3 h".
 hold_human() {
     local h
     h=$(hold_seconds)
-    if [ "$h" = indefinite ]; then echo indefinite
+    if   [ -z "$h" ];            then echo "not set"
+    elif [ "$h" = indefinite ];  then echo indefinite
     else awk -v s="$h" 'BEGIN{printf "%g h", s/3600}'; fi
 }
 
@@ -144,6 +144,7 @@ remaining_seconds() {
     local now HOLD lid idle_ns idle since_open left
     now=$(date +%s)
     HOLD=$(hold_seconds)
+    [ -z "$HOLD" ] && return 0               # unconfigured -> no countdown
     [ "$HOLD" = indefinite ] && return 0     # never sleeps -> no countdown
     lid=$(lid_state)
     if [ "$lid" = open ]; then
@@ -280,8 +281,15 @@ cmd_tick() {
         fi
     fi
 
-    HOLD=$(( DEFAULT_HOURS * 3600 ))
+    HOLD=""
     [ -r "$CONF" ] && . "$CONF"
+
+    # ---- No window configured (missing/empty conf): behave like a normal Mac ----
+    if [ -z "$HOLD" ]; then
+        log_mode unconfigured "no awake window configured — letting macOS sleep normally"
+        pmset -a disablesleep 0
+        return 0
+    fi
 
     # ---- Indefinite awake window: hold awake forever, never count down ----
     if [ "$HOLD" = indefinite ]; then
@@ -379,12 +387,12 @@ cmd_install() {
         if [ -r "$CONF" ]; then
             HOURS=$(hold_seconds)                                              # reuse existing window
             [ "$HOURS" = indefinite ] || HOURS=$(awk -v s="$HOURS" 'BEGIN{printf "%g", s/3600}')
-        elif [ -e /dev/tty ]; then
-            printf 'Hours to stay awake before sleeping: ' > /dev/tty
+        elif { : < /dev/tty; } 2>/dev/null; then     # a real terminal we can prompt on
+            printf 'Hours to stay awake before sleeping, or "indefinite": ' > /dev/tty
             read -r HOURS < /dev/tty || true
         fi
-        HOURS="${HOURS:-$DEFAULT_HOURS}"
     fi
+    [ -n "$HOURS" ] || die "no awake window given. Pass hours (e.g. 'sudo lidle install 3') or 'indefinite'."
 
     # Resolve our own path so we can copy onto PATH (skip if already there).
     case "$0" in
@@ -802,7 +810,7 @@ usage() {
 lidle — give your MacBook an awake window before it sleeps.
 
 Usage:
-  sudo lidle install [hours]   Install/enable (default ${DEFAULT_HOURS}h; prompts if omitted)
+  sudo lidle install [hours]   Install/enable (prompts for hours if omitted)
   sudo lidle uninstall         Remove and re-enable normal sleep
   sudo lidle quit              Stop everything + restore sleep, but keep it installed
   sudo lidle set <hours>       Change the awake window (e.g. 1.5, or 'indefinite')

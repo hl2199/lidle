@@ -5,9 +5,8 @@ unplugging your external display doesn't put it to sleep the *instant* you do it
 
 By default, macOS sleeps almost immediately when you close the lid with no
 external display, or when you unplug the monitor you were using in clamshell
-mode. `lidle` holds that sleep off for a window you choose — **3 hours by
-default** — then lets the Mac sleep normally. Start using it again and the timer
-resets.
+mode. `lidle` holds that sleep off for a window you choose, then lets the Mac
+sleep normally. Start using it again and the timer resets.
 
 Sleep is always **delayed, never forced.** If something would normally keep your
 Mac awake (media playback, a download, screen sharing), it still does — lidle
@@ -24,7 +23,7 @@ only postpones the sleeps that were going to happen anyway.
 ```sh
 git clone https://github.com/<you>/lidle.git
 cd lidle
-sudo ./lidle install          # asks how many hours to stay awake (default 3)
+sudo ./lidle install          # asks how many hours to stay awake (or "indefinite")
 ```
 
 This copies `lidle` to `/usr/local/bin/` (so you can run it from anywhere) and
