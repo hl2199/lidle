@@ -1,224 +1,142 @@
-# clamshell-keepawake
+# lidle
 
-Give your MacBook an awake window before it sleeps, instead of sleeping the
-instant you close the lid or unplug your external displays.
+**Give your MacBook an awake window before it sleeps** — so closing the lid or
+unplugging your external display doesn't put it to sleep the *instant* you do it.
 
 By default, macOS sleeps almost immediately when you close the lid with no
 external display, or when you unplug the monitor you were using in clamshell
-mode. `clamshell-keepawake` postpones that sleep by **3 hours**, then lets the
-Mac sleep normally — and the timer resets the moment you start using it again.
+mode. `lidle` holds that sleep off for a window you choose — **3 hours by
+default** — then lets the Mac sleep normally. Start using it again and the timer
+resets.
 
-Everything is driven by one command:
-
-```sh
-sudo clamshell-keepawake install     # enable it
-     clamshell-keepawake status      # see what it's doing
-sudo clamshell-keepawake pause 30m   # opt out for a bit
-sudo clamshell-keepawake uninstall   # remove it
-```
-
-## What it does
-
-| Situation | Behavior |
-|---|---|
-| **Lid open, left idle** | Screen turns off after 10 min; the Mac stays awake **3 h**, then sleeps. Any input resets the 3 h. |
-| **Lid shut, monitor connected** (clamshell work) | Stays awake, no timer. |
-| **Lid shut, no monitor** (closed, or monitor unplugged) | Stays awake **3 h**, then sleeps. Opening the lid or reconnecting a monitor resets it. |
-
-Sleep is always **allowed, never forced**. If something would normally keep
-your Mac awake (media playback, a download, screen sharing), it still does — the
-tool only delays the sleeps that would have happened anyway.
-
-## How it works
-
-A MacBook can only stay awake with the lid shut via `pmset disablesleep`; the
-common `caffeinate` trick can't stop lid-close sleep. Installing registers a
-root LaunchDaemon that runs `clamshell-keepawake _tick` every 60 seconds, which:
-
-- holds `disablesleep` on while an awake window is active — and keeps it pre-armed
-  so closing the lid or unplugging a monitor can't race to sleep before the next
-  check;
-- measures how long you've been idle (lid open) or unplugged (lid shut);
-- at the 3-hour mark, sets `disablesleep 0` so macOS sleeps on its own.
-
-Install also points `pmset sleep` and `disksleep` at the awake window and
-`displaysleep` at 10 min (so `sleep 180 / disksleep 180 / displaysleep 10` for the
-default 3 h). It snapshots your previous values first and restores them on
-uninstall.
+Sleep is always **delayed, never forced.** If something would normally keep your
+Mac awake (media playback, a download, screen sharing), it still does — lidle
+only postpones the sleeps that were going to happen anyway.
 
 ## Requirements
 
-- macOS — developed and tested on macOS 15 (Sequoia); uses only `pmset`,
-  `ioreg`, `system_profiler`, and `launchctl`. Works on Apple Silicon and Intel.
-- A MacBook (it relies on the lid / clamshell sensor).
-- Administrator (`sudo`) access — it installs a system-wide LaunchDaemon.
+- A **MacBook** running macOS (developed and tested on macOS 15 Sequoia; works on
+  Apple Silicon and Intel). It relies on the lid / clamshell sensor.
+- **Administrator access** — it installs a small system-wide background service.
 
 ## Install
 
 ```sh
-git clone https://github.com/<you>/clamshell-keepawake.git
-cd clamshell-keepawake
-sudo ./clamshell-keepawake install        # asks how many hours to stay awake (default 3)
-# or set it directly:
-sudo ./clamshell-keepawake install 2      # stay awake 2 hours before sleeping (1.5 etc. allowed)
+git clone https://github.com/<you>/lidle.git
+cd lidle
+sudo ./lidle install          # asks how many hours to stay awake (default 3)
 ```
 
-`install` copies the script to `/usr/local/bin/`, so afterwards you can run
-`clamshell-keepawake` from anywhere.
+This copies `lidle` to `/usr/local/bin/` (so you can run it from anywhere) and
+starts a background service that does the work. Run it in a real Terminal window
+so `sudo` can prompt for your password.
 
-> Run it in a real Terminal window so `sudo` can prompt for your password.
+> To set the window up front instead of being prompted: `sudo ./lidle install 2`
+> (`1.5` and other fractions are allowed).
 
-## Usage
+## Using lidle
 
-| Command | Needs sudo | What it does |
+### Menu bar (recommended)
+
+The easiest way to use lidle day to day is a menu bar item, via
+[SwiftBar](https://swiftbar.app):
+
+```sh
+brew install --cask swiftbar     # then launch it once and choose a Plugin Folder
+sudo lidle menu-setup            # add lidle's menu item
+```
+
+The icon is **☀** when lidle is holding your Mac awake and **🌙** when it isn't
+(off or paused). Click it for:
+
+- **Pause for** ▸ 1h / 3h / 8h / Indefinite / Custom… — let the Mac sleep normally for a while
+- **Set awake window** ▸ 1h / 3h / 8h / Indefinite / Custom… — change how long it stays awake
+- **Open log**, and **Quit** (stop lidle and restore normal sleep)
+
+`menu-setup` keeps the item across reboots and adds a narrowly-scoped,
+passwordless `sudo` rule so the buttons act instantly — it can run **only**
+lidle's own pause / resume / set / quit, nothing else. Remove just the menu with
+`sudo lidle menu-remove`.
+
+### Command line
+
+Everything the menu does is also a command:
+
+| Command | sudo | What it does |
 |---|---|---|
-| `clamshell-keepawake install [hours]` | yes | Install/enable. Prompts for hours if omitted (default 3). |
-| `clamshell-keepawake uninstall` | yes | Remove the daemon and re-enable normal sleep. |
-| `clamshell-keepawake quit` | yes | Stop the daemon and restore normal sleep, but keep it installed (re-enable with `install`). |
-| `clamshell-keepawake set <hours>` | yes | Change the awake window (e.g. `1.5`, or `indefinite`). Re-arms immediately; if paused, resumes with the new time. |
-| `clamshell-keepawake pause [dur]` | yes | Opt out until `resume`, or for a while: `pause 30m`, `pause 2h`. |
-| `clamshell-keepawake resume` | yes | Cancel a pause. |
-| `clamshell-keepawake status` | no | Show daemon, awake window, lid, pause state, and time left. |
-| `clamshell-keepawake logs` | no | Follow the daemon log (records each state change). |
-| `clamshell-keepawake version` | no | Print the version. |
+| `lidle install [hours]` | yes | Install and enable (prompts for hours if omitted). |
+| `lidle set <hours\|indefinite>` | yes | Change the awake window. |
+| `lidle pause [duration]` | yes | Let it sleep normally for a while (`pause 30m`) or until `resume`. |
+| `lidle resume` | yes | Cancel a pause. |
+| `lidle status` | no | Show current state and time left. |
+| `lidle logs` | no | Follow the log (one line per state change). |
+| `lidle quit` | yes | Stop lidle but keep it installed. |
+| `lidle uninstall` | yes | Remove everything and restore normal sleep. |
 
 ```text
-$ clamshell-keepawake status
-clamshell-keepawake: installed
+$ lidle status
+lidle: installed
   Awake window:  3 h
   Lid:           open
   Paused:        no
   Keeping awake: yes  (sleeps in ~2 h 14 m if left idle)
 ```
 
-## Pause
+## What to expect
 
-`pause` is the clean way to let your Mac sleep normally for a while without
-uninstalling — handy when you *want* it to sleep on lid-close:
+The rule is simple: **whenever your Mac would normally sleep, lidle delays that
+sleep by your awake window, then lets it sleep.** Using the Mac again resets the
+timer. In each situation:
 
-```sh
-sudo clamshell-keepawake pause       # until you run 'resume'
-sudo clamshell-keepawake pause 45m   # auto-resumes after 45 minutes
-sudo clamshell-keepawake resume      # cancel early
-```
+| Situation | Behavior |
+|---|---|
+| Lid open, left idle | Screen off after ~10 min; sleeps after the window. Any input resets it. |
+| Lid shut, monitor connected (clamshell) | Stays awake, no timer. |
+| Lid shut, no monitor (closed, or unplugged) | Stays awake for the window, then sleeps. Opening the lid or reconnecting a monitor resets it. |
 
-While paused, the daemon stops holding the Mac awake and macOS sleeps on its own
-schedule.
+Set the window to **`indefinite`** to keep the Mac awake with no time limit.
 
-## Menu bar (SwiftBar)
+## Heads-up
 
-Prefer a menu bar item over the terminal? `clamshell-keepawake` ships a
-[SwiftBar](https://swiftbar.app) menu that shows the current state and gives you
-one-click pause/resume and awake-window controls.
-
-1. Install SwiftBar (`brew install --cask swiftbar`) and, on first launch, pick a
-   Plugin Folder.
-2. Add the menu item:
-   ```sh
-   sudo clamshell-keepawake menu-setup
-   ```
-
-This drops a tiny SwiftBar plugin (calling `clamshell-keepawake menu`) into your
-plugin folder, and installs a **scoped, passwordless `sudo` rule** so the menu's
-actions act instantly. The rule (`/etc/sudoers.d/clamshell-keepawake`) lets your
-user run **only** four `clamshell-keepawake` subcommands without a password —
-`pause [duration]`, `resume`, `set <hours>`, and `quit` (the menu's own buttons) —
-and nothing else. `pause` and `set` each carry a wildcard for their one numeric
-argument (the timed-pause and awake-window presets); `resume` and `quit` are
-exact. It's written to a temp file and checked with `visudo` before being
-installed `0440 root:wheel`, so a malformed rule can't break `sudo`.
-
-It also installs a per-user **LaunchAgent**
-(`~/Library/LaunchAgents/com.clamshellkeepawake.menu.plist`) that starts SwiftBar
-at login, so the menu is present after every reboot — no need to toggle SwiftBar's
-own "Launch at Login." (The keep-awake daemon runs as a root *LaunchDaemon* and
-can't launch GUI apps into your session; the menu autostart has to be a
-*LaunchAgent* in your login session, which is what this sets up.)
-
-The menu-bar icon is **☀** (holding the Mac awake) or **🌙** (not holding —
-off, idle, or paused). The dropdown shows:
-
-```
-☀
-──────────────────────────────
-Active
-Awake window: 3 h
-sleeps in ~2 h 14 m    (the live countdown, when one is running)
-──────────────────────────────
-Set awake window ▸ 1h / 3h / 8h / Indefinite / Custom…
-Pause for ▸ 1h / 3h / 8h / Indefinite / Custom…   (a single Resume when paused)
-──────────────────────────────
-Open log
-Refresh
-──────────────────────────────
-Quit                  (stop everything, restore normal sleep)
-```
-
-**Quit** stops the daemon (so it won't restart on reboot), restores normal sleep —
-including the `sleep`/`displaysleep` timers from before install — and removes the
-menu item, but keeps the `clamshell-keepawake` command so you can switch it back on
-with `install`.
-
-Remove just the menu (leaving the core tool installed):
-
-```sh
-sudo clamshell-keepawake menu-remove
-```
-
-`uninstall` (and `quit`) also remove the menu plugin, sudo rule, and login agent
-automatically.
+- **Heat** — while a window is active, a closed MacBook with no external display
+  stays fully awake (and warm). Keep an eye on it, especially with an
+  `indefinite` window, which never ends on its own.
+- **Manual sleep** — while a window is active, the Apple menu's *Sleep* won't
+  sleep the Mac (lidle has to stay armed to catch a lid-close). To sleep on
+  demand, `pause` first: `sudo lidle pause && pmset sleepnow`.
+- Settings are system-wide and persist across reboots; the 60-second check makes
+  timing accurate to about a minute.
 
 ## Uninstall
 
 ```sh
-sudo clamshell-keepawake uninstall
+sudo lidle uninstall
 ```
 
-Removes the daemon, re-enables normal sleep, and restores the `sleep` /
-`disksleep` / `displaysleep` timers to the values you had before installing
-(snapshotted at install time).
+A full wipe: it removes the service, binary, config, log, and menu item, restores
+the `sleep` / `displaysleep` timers it changed at install, and verifies nothing is
+left behind. Use `lidle quit` instead to stop lidle but keep it installed with
+your settings intact.
 
-## Configuration
+## How it works
 
-- **Awake window (how long it stays awake)** — `sudo clamshell-keepawake set 1.5`.
-  Updates the daemon's config (`/usr/local/etc/clamshell-keepawake.conf`) and the
-  matching `pmset` timers together, and re-arms right away. Use
-  `sudo clamshell-keepawake set indefinite` to keep the Mac awake with no time
-  limit — it never sleeps on idle or lid-close until you change the window or pause.
-- **Check interval** — `StartInterval` (default `60` seconds) in the generated
-  `/Library/LaunchDaemons/com.clamshellkeepawake.plist`; this is also the timing
-  resolution. Edit it and re-run `sudo clamshell-keepawake install` to regenerate.
-- **Screen-off delay** — defaults to 10 min (or just under the awake window for
-  very short durations). Change anytime with `sudo pmset -a displaysleep <min>`.
+A MacBook can only stay awake with the lid shut via `pmset disablesleep` — the
+common `caffeinate` trick can't stop lid-close sleep. Installing registers a root
+**LaunchDaemon** that runs `lidle _tick` every 60 seconds. Each tick:
 
-## Caveats
+- holds `disablesleep` on while your window is active, and keeps it pre-armed so
+  closing the lid or unplugging a monitor can't race to sleep before the next check;
+- measures how long you've been idle (lid open) or unplugged (lid shut);
+- at the end of the window, sets `disablesleep 0` and lets macOS sleep on its own.
 
-- **⚠️ Don't seal a closed MacBook in a bag mid-window.** While an awake window is
-  active, closing the lid with no external display keeps the Mac fully awake (and
-  warm) for the awake window instead of sleeping — so a closed laptop in a bag can
-  build up heat. Run `sudo clamshell-keepawake pause` before you pack it away (or
-  `pause 8h` for a trip), then `resume` later. With an **indefinite** window this
-  never ends, so always pause (or switch back to a finite window) before transport.
-- **Manual sleep is blocked while an awake window is active.** Because
-  `disablesleep` has to stay armed to catch a lid-close, the Apple menu's *Sleep*
-  and the power button won't sleep the Mac during a window. The simplest fix is
-  to `pause` first:
-  ```sh
-  sudo clamshell-keepawake pause && pmset sleepnow
-  ```
-- All settings are system-wide and persist across reboots.
-- The 60-second poll makes timing accurate to within about a minute.
+Install also points `pmset sleep`/`disksleep` at your window and `displaysleep` at
+10 min, snapshotting your previous values first and restoring them on uninstall.
+The menu bar item is a thin SwiftBar plugin that calls `lidle menu`; a per-user
+LaunchAgent starts SwiftBar at login so the item is there after reboots.
 
-## Files
-
-| File | Installed to |
-|---|---|
-| `clamshell-keepawake` | `/usr/local/bin/` |
-| `com.clamshellkeepawake.plist` (generated by `install`) | `/Library/LaunchDaemons/` |
-| config | `/usr/local/etc/clamshell-keepawake.conf` |
-| sleep-timer snapshot (restored on uninstall) | `/usr/local/etc/clamshell-keepawake.saved-pmset` |
-
-Logs go to `/var/log/clamshell-keepawake.log`.
+Files it manages: `/usr/local/bin/lidle`,
+`/Library/LaunchDaemons/com.lidle.plist`, config `/usr/local/etc/lidle.conf`, and
+log `/var/log/lidle.log`.
 
 ## License
 

@@ -1,40 +1,40 @@
 #!/bin/bash
-# clamshell-keepawake — give your MacBook an awake window before it sleeps.
+# lidle — give your MacBook an awake window before it sleeps.
 #
 # One command for the whole lifecycle. The hidden `_tick` subcommand is what the
 # LaunchDaemon runs every 60s; everything else is for humans:
 #
-#   sudo clamshell-keepawake install [hours]   install/enable (default 3h)
-#   sudo clamshell-keepawake uninstall         remove, re-enable normal sleep
-#   sudo clamshell-keepawake set <hours>       change the awake window
-#   sudo clamshell-keepawake pause [dur]       opt out (until 'resume', or e.g. 30m)
-#   sudo clamshell-keepawake resume            cancel a pause
-#        clamshell-keepawake status            show current state
-#        clamshell-keepawake logs              follow the daemon log
+#   sudo lidle install [hours]   install/enable (default 3h)
+#   sudo lidle uninstall         remove, re-enable normal sleep
+#   sudo lidle set <hours>       change the awake window
+#   sudo lidle pause [dur]       opt out (until 'resume', or e.g. 30m)
+#   sudo lidle resume            cancel a pause
+#        lidle status            show current state
+#        lidle logs              follow the daemon log
 #
 # No `set -e`: the _tick logic relies on `cond && action` lines and a `grep -c`
 # that exits non-zero on a 0 count, which are correct as written but would abort
 # under -e. The mutating steps that must succeed use explicit `|| die`.
 set -uo pipefail
 
-LABEL="com.clamshellkeepawake"
+LABEL="com.lidle"
 PLIST="/Library/LaunchDaemons/${LABEL}.plist"
-BIN="/usr/local/bin/clamshell-keepawake"
-CONF="/usr/local/etc/clamshell-keepawake.conf"
-SAVED_PMSET="/usr/local/etc/clamshell-keepawake.saved-pmset"
-LOG="/var/log/clamshell-keepawake.log"
+BIN="/usr/local/bin/lidle"
+CONF="/usr/local/etc/lidle.conf"
+SAVED_PMSET="/usr/local/etc/lidle.saved-pmset"
+LOG="/var/log/lidle.log"
 
 # Runtime state (created by the daemon as root; world-readable so `status` works
 # without sudo).
-CLOSED_SINCE="/var/run/clamshell-keepawake.closed-since"
-OPEN_SINCE="/var/run/clamshell-keepawake.open-since"
-DONE="/var/run/clamshell-keepawake.done"
-PREV_LID="/var/run/clamshell-keepawake.prev-lid"
-PAUSED="/var/run/clamshell-keepawake.paused"
-MODE="/var/run/clamshell-keepawake.mode"
-SUDOERS="/etc/sudoers.d/clamshell-keepawake"
-PLUGIN_NAME="clamshell-keepawake.5s.sh"
-AGENT_LABEL="com.clamshellkeepawake.menu"
+CLOSED_SINCE="/var/run/lidle.closed-since"
+OPEN_SINCE="/var/run/lidle.open-since"
+DONE="/var/run/lidle.done"
+PREV_LID="/var/run/lidle.prev-lid"
+PAUSED="/var/run/lidle.paused"
+MODE="/var/run/lidle.mode"
+SUDOERS="/etc/sudoers.d/lidle"
+PLUGIN_NAME="lidle.5s.sh"
+AGENT_LABEL="com.lidle.menu"
 
 DEFAULT_HOURS=3
 VERSION="1.0.0"
@@ -44,7 +44,7 @@ VERSION="1.0.0"
 die() { echo "error: $*" >&2; exit 1; }
 
 need_root() {
-    [ "$(id -u)" -eq 0 ] || die "this command needs root. Re-run: sudo clamshell-keepawake ${1:-<cmd>}"
+    [ "$(id -u)" -eq 0 ] || die "this command needs root. Re-run: sudo lidle ${1:-<cmd>}"
 }
 
 # The GUI user to scope per-user actions to. Uses $SUDO_USER when run via sudo,
@@ -342,53 +342,36 @@ cmd_tick() {
 # ---- install / uninstall / set --------------------------------------------
 
 print_install_summary() {
-    local HOURS="$1" awake awake_human
-    echo "Installed and loaded ${LABEL}."
-    awake=$(pmset -g | awk '/SleepDisabled/{print $2; exit}')
-    if [ "${awake:-0}" = 1 ]; then
-        awake_human="yes -- a keep-awake window is active right now"
-    else
-        awake_human="no -- normal sleep is in effect right now"
-    fi
-    echo
-    echo "What's now in effect:"
-    if [ "${HOURS}" = indefinite ]; then
-        echo "  - Awake window: INDEFINITE -- the Mac will not sleep on idle or lid-close"
-        echo "    until you change the window or pause. Screen still turns off after"
-        echo "    ${APPLIED_DISP} min. Lid shut with a monitor also stays awake, as usual."
-    else
-        echo "  - Awake window: stays awake ${HOURS} hour(s) before it's allowed to sleep."
-        echo "  - Lid open, left alone: screen off after ${APPLIED_DISP} min; sleeps after the"
-        echo "    awake window. Using it again resets the timer."
-        echo "  - Lid shut WITH a monitor (clamshell): stays awake, no timer."
-        echo "  - Lid shut with NO monitor (closed, or monitor unplugged): stays awake the"
-        echo "    awake window, then sleeps. Opening the lid or reconnecting a monitor resets it."
-    fi
-    echo "  - Keeping the Mac awake right now? ${awake_human}"
-    echo "  - A background helper re-checks every 60 seconds."
+    local HOURS="$1"
+    echo "Installed and loaded lidle."
     echo
     if [ "${HOURS}" = indefinite ]; then
-        echo "Heads up: with an INDEFINITE window, a closed MacBook with no external display"
-        echo "stays awake (and warm) FOREVER -- never put it in a bag without pausing or"
-        echo "switching to a finite window first."
+        echo "Your Mac now stays awake whenever it would otherwise sleep -- closing the"
+        echo "lid, unplugging a monitor, or sitting idle -- with no time limit, until you"
+        echo "change the window or pause."
+        echo
+        echo "Heads up: a closed MacBook with no external display stays awake (and warm)"
+        echo "the whole time -- keep an eye on it."
     else
-        echo "Heads up: while an awake window is active, a closed MacBook with no external"
-        echo "display stays awake (and warm) until the awake window ends -- don't seal it in"
-        echo "a bag mid-window. Run 'sudo clamshell-keepawake pause' first if you do."
+        echo "Your Mac now waits ${HOURS} hour(s) before sleeping whenever it would"
+        echo "otherwise sleep -- closing the lid, unplugging a monitor, or sitting idle."
+        echo "After that it sleeps as usual; using it again resets the timer."
+        echo
+        echo "Heads up: while the window is active, a closed MacBook with no external"
+        echo "display stays awake (and warm) until the window ends -- keep an eye on it."
     fi
     echo
-    echo "Check state anytime:   clamshell-keepawake status"
-    echo "Change the duration:   sudo clamshell-keepawake set <hours>"
+    echo "Check state anytime:  lidle status   (or the menu bar item)"
 }
 
 cmd_install() {
     need_root install
-    # Warn (don't block) if there's no lid/clamshell sensor — clamshell-keepawake
+    # Warn (don't block) if there's no lid/clamshell sensor — lidle
     # is meant for MacBooks, but a false negative must never stop a real install.
     # Match the captured string, not `... | grep -q` (see lid_state for why).
     case "$(ioreg -r -k AppleClamshellState -d 4)" in
         *AppleClamshellState*) : ;;
-        *) echo "warning: no lid sensor detected; clamshell-keepawake is meant for" >&2
+        *) echo "warning: no lid sensor detected; lidle is meant for" >&2
            echo "         MacBooks. Continuing anyway." >&2 ;;
     esac
     local HOURS="${1:-}" src
@@ -397,7 +380,7 @@ cmd_install() {
             HOURS=$(hold_seconds)                                              # reuse existing window
             [ "$HOURS" = indefinite ] || HOURS=$(awk -v s="$HOURS" 'BEGIN{printf "%g", s/3600}')
         elif [ -e /dev/tty ]; then
-            printf 'Hours to stay awake before sleeping [%s]: ' "$DEFAULT_HOURS" > /dev/tty
+            printf 'Hours to stay awake before sleeping: ' > /dev/tty
             read -r HOURS < /dev/tty || true
         fi
         HOURS="${HOURS:-$DEFAULT_HOURS}"
@@ -442,24 +425,38 @@ teardown() {
 cmd_uninstall() {
     need_root uninstall
     teardown
-    rm -f "$BIN" "$SAVED_PMSET"
+    rm -f "$BIN" "$SAVED_PMSET" "$CONF" "$LOG"   # full wipe (quit keeps conf/log)
     echo "Removed ${LABEL}, re-enabled normal sleep, and restored the sleep /"
     echo "disksleep / displaysleep timers to the values you had before installing."
+
+    # Confirm a clean removal: every file/service lidle creates should be gone.
+    local f clean=yes
+    for f in "$PLIST" "$BIN" "$CONF" "$SAVED_PMSET" "$LOG" "$SUDOERS" \
+             "$CLOSED_SINCE" "$OPEN_SINCE" "$DONE" "$PREV_LID" "$PAUSED" "$MODE"; do
+        [ -e "$f" ] || continue
+        [ "$clean" = yes ] && { echo; echo "warning: these artifacts are still present:"; }
+        clean=no; echo "  $f"
+    done
+    if launchctl print "system/${LABEL}" >/dev/null 2>&1; then
+        [ "$clean" = yes ] && { echo; echo "warning: these artifacts are still present:"; }
+        clean=no; echo "  daemon still loaded: ${LABEL}"
+    fi
+    [ "$clean" = yes ] && echo "Verified: all lidle files and services removed."
 }
 
 # Stop everything but keep the binary installed (re-enable later with install).
 cmd_quit() {
     need_root quit
     teardown
-    echo "clamshell-keepawake stopped; normal sleep restored."
-    echo "Still installed — re-enable anytime with: sudo clamshell-keepawake install"
+    echo "lidle stopped; normal sleep restored."
+    echo "Still installed — re-enable anytime with: sudo lidle install"
 }
 
 cmd_set() {
     need_root "set <hours>"
     local HOURS="${1:-}" win was_paused=no
-    [ -n "$HOURS" ] || die "usage: sudo clamshell-keepawake set <hours|indefinite>"
-    [ -f "$PLIST" ] || die "not installed yet -- run: sudo clamshell-keepawake install ${HOURS}"
+    [ -n "$HOURS" ] || die "usage: sudo lidle set <hours|indefinite>"
+    [ -f "$PLIST" ] || die "not installed yet -- run: sudo lidle install ${HOURS}"
     [ -f "$PAUSED" ] && was_paused=yes      # note it before clear_state removes it
     apply_duration "$HOURS"
     clear_state                 # also cancels any active pause
@@ -481,15 +478,15 @@ cmd_set() {
 cmd_pause() {
     need_root pause
     local arg="${1:-}" secs until
-    [ -f "$PLIST" ] || die "not installed yet -- run: sudo clamshell-keepawake install"
+    [ -f "$PLIST" ] || die "not installed yet -- run: sudo lidle install"
     if [ -z "$arg" ]; then
         echo indefinite > "$PAUSED"
-        echo "Paused. Normal sleep is in effect until you run: clamshell-keepawake resume"
+        echo "Paused. Normal sleep is in effect until you run: lidle resume"
     else
         secs=$(parse_duration "$arg") || die "bad duration '${arg}' (try 30m, 2h, 90s)"
         until=$(( $(date +%s) + secs ))
         echo "$until" > "$PAUSED"
-        echo "Paused for $(fmt_dur "$secs") (until $(date -r "$until" +%H:%M)). Resume early: clamshell-keepawake resume"
+        echo "Paused for $(fmt_dur "$secs") (until $(date -r "$until" +%H:%M)). Resume early: lidle resume"
     fi
     chmod 644 "$PAUSED"
     cmd_tick                    # apply immediately (tick sees the pause file)
@@ -529,9 +526,9 @@ cmd_status() {
     now=$(date +%s)
 
     if [ -f "$PLIST" ]; then
-        echo "clamshell-keepawake: installed"
+        echo "lidle: installed"
     else
-        echo "clamshell-keepawake: not installed (run: sudo clamshell-keepawake install)"
+        echo "lidle: not installed (run: sudo lidle install)"
     fi
     echo "  Awake window:  $(hold_human)"
     echo "  Lid:           $(lid_state)"
@@ -566,7 +563,7 @@ cmd_status() {
 }
 
 # Emit a SwiftBar menu: title line, then ---, then info + action lines.
-# Read-only (no root). Action items shell out to sudo clamshell-keepawake ...,
+# Read-only (no root). Action items shell out to sudo lidle ...,
 # made prompt-free by the sudoers drop-in that menu-setup installs.
 cmd_menu() {
     local paused awake phrase
@@ -575,7 +572,7 @@ cmd_menu() {
         echo "⚠️"
         echo "---"
         echo "Not installed"
-        echo "Run: sudo clamshell-keepawake install"
+        echo "Run: sudo lidle install"
         return 0
     fi
 
@@ -628,14 +625,14 @@ cmd_menu() {
     echo "Open log | bash=/usr/bin/open param1=$LOG terminal=false"
     echo "Refresh | refresh=true"
     echo "---"
-    echo "Quit clamshell-keepawake | bash=/usr/bin/sudo param1=$BIN param2=quit terminal=false"
+    echo "Quit lidle | bash=/usr/bin/sudo param1=$BIN param2=quit terminal=false"
 }
 
 # Custom… menu action (awake window): prompt for hours, then apply via sudo set.
 # Runs as the user (SwiftBar); sudo is prompt-free via the menu sudoers rule.
 cmd_set_prompt() {
     local hours
-    hours=$(osascript -e 'set h to text returned of (display dialog "Awake window — hours to stay awake before sleeping:" default answer "3" with title "clamshell-keepawake")' 2>/dev/null) || return 0
+    hours=$(osascript -e 'set h to text returned of (display dialog "Awake window — hours to stay awake before sleeping:" default answer "3" with title "lidle")' 2>/dev/null) || return 0
     [ -n "$hours" ] || return 0
     sudo "$BIN" set "$hours"
 }
@@ -644,7 +641,7 @@ cmd_set_prompt() {
 # Runs as the user (SwiftBar); sudo is prompt-free via the menu sudoers rule.
 cmd_pause_prompt() {
     local dur
-    dur=$(osascript -e 'set d to text returned of (display dialog "Pause for how long? (e.g. 30m, 2h)" default answer "1h" with title "clamshell-keepawake")' 2>/dev/null) || return 0
+    dur=$(osascript -e 'set d to text returned of (display dialog "Pause for how long? (e.g. 30m, 2h)" default answer "1h" with title "lidle")' 2>/dev/null) || return 0
     [ -n "$dur" ] || return 0
     sudo "$BIN" pause "$dur"
 }
@@ -748,7 +745,15 @@ remove_menu_artifacts() {
     rm -f "$SUDOERS"
     [ -n "$user" ] || return 0
     dir=$(swiftbar_plugin_dir "$user")
-    [ -n "$dir" ] && rm -f "$dir/$PLUGIN_NAME"
+    if [ -n "$dir" ]; then
+        rm -f "$dir/$PLUGIN_NAME"
+        # If ours was the only plugin, quit SwiftBar so it doesn't replace our
+        # menu item with its own placeholder icon. `ls` (no -A) ignores dotfiles
+        # like .DS_Store; if other plugins remain, leave SwiftBar running.
+        if [ -z "$(ls "$dir" 2>/dev/null)" ]; then
+            sudo -u "$user" killall SwiftBar 2>/dev/null || true
+        fi
+    fi
     remove_menu_agent "$user"
 }
 
@@ -757,7 +762,7 @@ cmd_menu_setup() {
     local user dir
     user=$(target_user)
     [ -n "$user" ] || die "couldn't determine your user account to scope the sudoers rule"
-    [ -f "$PLIST" ] || die "install first: sudo clamshell-keepawake install"
+    [ -f "$PLIST" ] || die "install first: sudo lidle install"
 
     # Locate SwiftBar's plugin folder first: don't grant passwordless sudo for a
     # menu we can't actually install yet.
@@ -765,7 +770,7 @@ cmd_menu_setup() {
     if [ -z "$dir" ] || [ ! -d "$dir" ]; then
         echo "SwiftBar plugin folder not found."
         echo "Install SwiftBar (https://swiftbar.app), set its Plugin Folder, then re-run:"
-        echo "  sudo clamshell-keepawake menu-setup"
+        echo "  sudo lidle menu-setup"
         return 0
     fi
 
@@ -794,21 +799,21 @@ cmd_logs() {
 
 usage() {
     cat <<EOF
-clamshell-keepawake — give your MacBook an awake window before it sleeps.
+lidle — give your MacBook an awake window before it sleeps.
 
 Usage:
-  sudo clamshell-keepawake install [hours]   Install/enable (default ${DEFAULT_HOURS}h; prompts if omitted)
-  sudo clamshell-keepawake uninstall         Remove and re-enable normal sleep
-  sudo clamshell-keepawake quit              Stop everything + restore sleep, but keep it installed
-  sudo clamshell-keepawake set <hours>       Change the awake window (e.g. 1.5, or 'indefinite')
-  sudo clamshell-keepawake menu-setup        Add the SwiftBar menu bar item (+ passwordless sudo for it)
-  sudo clamshell-keepawake menu-remove       Remove the menu bar item and its sudo rule
-  sudo clamshell-keepawake pause [dur]       Opt out until 'resume', or for a while (e.g. 30m, 2h)
-  sudo clamshell-keepawake resume            Cancel a pause
-       clamshell-keepawake status            Show current state
-       clamshell-keepawake logs              Follow the daemon log (records each state change)
-       clamshell-keepawake version           Print the version
-       clamshell-keepawake help              This help
+  sudo lidle install [hours]   Install/enable (default ${DEFAULT_HOURS}h; prompts if omitted)
+  sudo lidle uninstall         Remove and re-enable normal sleep
+  sudo lidle quit              Stop everything + restore sleep, but keep it installed
+  sudo lidle set <hours>       Change the awake window (e.g. 1.5, or 'indefinite')
+  sudo lidle menu-setup        Add the SwiftBar menu bar item (+ passwordless sudo for it)
+  sudo lidle menu-remove       Remove the menu bar item and its sudo rule
+  sudo lidle pause [dur]       Opt out until 'resume', or for a while (e.g. 30m, 2h)
+  sudo lidle resume            Cancel a pause
+       lidle status            Show current state
+       lidle logs              Follow the daemon log (records each state change)
+       lidle version           Print the version
+       lidle help              This help
 EOF
 }
 
@@ -827,7 +832,7 @@ case "${1:-help}" in
     menu-remove)    cmd_menu_remove ;;
     logs)           shift; cmd_logs "$@" ;;
     _tick)          cmd_tick ;;
-    version|-v|--version) echo "clamshell-keepawake ${VERSION}" ;;
+    version|-v|--version) echo "lidle ${VERSION}" ;;
     help|-h|--help) usage ;;
     *)              echo "unknown command: $1" >&2; usage; exit 1 ;;
 esac
