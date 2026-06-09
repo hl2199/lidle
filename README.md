@@ -38,19 +38,25 @@ so `sudo` can prompt for your password.
 ### Menu bar (recommended)
 
 The easiest way to use lidle day to day is a menu bar item, via
-[SwiftBar](https://swiftbar.app):
+[SwiftBar](https://swiftbar.app). When you run `sudo lidle install` in a terminal it
+offers to set this up for you — and if SwiftBar isn't installed, it offers to install
+it via [Homebrew](https://brew.sh). So there's usually nothing else to do.
+
+To add the menu item on its own (or after declining it at install):
 
 ```sh
-brew install --cask swiftbar     # then launch it once and choose a Plugin Folder
-sudo lidle menu-setup            # add lidle's menu item
+sudo lidle menu-setup            # installs SwiftBar via Homebrew if it's missing
 ```
 
-The icon is **☀** when lidle is holding your Mac awake and **🌙** when it isn't
+Without Homebrew, install SwiftBar from https://swiftbar.app first, then run `menu-setup`.
+
+The icon is **☀** when lidle is holding your Mac awake and **☾** when it isn't
 (off or paused). Click it for:
 
 - **Pause for** ▸ 1h / 3h / 8h / Indefinite / Custom… — let the Mac sleep normally for a while
 - **Set awake window** ▸ 1h / 3h / 8h / Indefinite / Custom… — change how long it stays awake
-- **Open log**, and **Quit** (stop lidle and restore normal sleep)
+- **Open log**, **Remove menu bar** (drop just the menu, keep lidle running), and
+  **Exit** (stop lidle and restore normal sleep)
 
 `menu-setup` keeps the item across reboots and adds a narrowly-scoped,
 passwordless `sudo` rule so the buttons act instantly — it can run **only**
@@ -89,7 +95,7 @@ timer. In each situation:
 
 | Situation | Behavior |
 |---|---|
-| Lid open, left idle | Screen off after ~10 min; sleeps after the window. Any input resets it. |
+| Lid open, left idle | Screen off per your macOS display settings; sleeps after the window. Any input resets it. |
 | Lid shut, monitor connected (clamshell) | Stays awake, no timer. |
 | Lid shut, no monitor (closed, or unplugged) | Stays awake for the window, then sleeps. Opening the lid or reconnecting a monitor resets it. |
 
@@ -113,7 +119,7 @@ sudo lidle uninstall
 ```
 
 A full wipe: it removes the service, binary, config, log, and menu item, restores
-the `sleep` / `displaysleep` timers it changed at install, and verifies nothing is
+the `sleep` / `disksleep` timers it changed at install, and verifies nothing is
 left behind. Use `lidle quit` instead to stop lidle but keep it installed with
 your settings intact.
 
@@ -128,8 +134,9 @@ common `caffeinate` trick can't stop lid-close sleep. Installing registers a roo
 - measures how long you've been idle (lid open) or unplugged (lid shut);
 - at the end of the window, sets `disablesleep 0` and lets macOS sleep on its own.
 
-Install also points `pmset sleep`/`disksleep` at your window and `displaysleep` at
-10 min, snapshotting your previous values first and restoring them on uninstall.
+Install also points `pmset sleep`/`disksleep` at your window, snapshotting your
+previous values first and restoring them on uninstall. Your display-off (screen)
+timer is left untouched, so the screen keeps following your macOS display settings.
 The menu bar item is a thin SwiftBar plugin that calls `lidle menu`; a per-user
 LaunchAgent starts SwiftBar at login so the item is there after reboots.
 

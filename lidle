@@ -178,7 +178,6 @@ save_pmset() {
         /^Battery Power:/ { src="b"; next }
         src && $1=="sleep"        { print src, "sleep", $2 }
         src && $1=="disksleep"    { print src, "disksleep", $2 }
-        src && $1=="displaysleep" { print src, "displaysleep", $2 }
     ' > "$SAVED_PMSET"
     chmod 644 "$SAVED_PMSET"
 }
@@ -192,26 +191,23 @@ restore_pmset() {
     done < "$SAVED_PMSET"
 }
 
-# Write conf + matching pmset timers for HOURS. Leaves APPLIED_HOLD / APPLIED_DISP
-# set for the caller's summary.
+# Write conf + matching pmset timers for HOURS. Leaves APPLIED_HOLD set for the
+# caller's summary.
 apply_duration() {
-    local HOURS="$1" HOLD_SECONDS SLEEP_MIN DISP_MIN
+    local HOURS="$1" HOLD_SECONDS SLEEP_MIN
     if [ "$HOURS" = indefinite ]; then
         install -d -m 755 /usr/local/etc
         printf 'HOLD=indefinite\n' > "$CONF"; chmod 644 "$CONF"
         save_pmset                  # capture the originals once, before we overwrite
         pmset -a sleep 0            # 0 = never idle-sleep
         pmset -a disksleep 0
-        pmset -a displaysleep 10    # screen still turns off after 10 min
         APPLIED_HOLD=indefinite
-        APPLIED_DISP=10
         return 0
     fi
     awk -v h="$HOURS" 'BEGIN{exit !(h+0>0)}' \
         || die "HOURS must be a positive number or 'indefinite' (got '${HOURS}')"
     HOLD_SECONDS=$(awk -v h="$HOURS" 'BEGIN{printf "%d", (h*3600)+0.5}')
     SLEEP_MIN=$(awk -v s="$HOLD_SECONDS" 'BEGIN{m=int((s/60)+0.5); if(m<1)m=1; print m}')
-    DISP_MIN=$(awk -v m="$SLEEP_MIN" 'BEGIN{ if(m>10) print 10; else {d=m-1; if(d<1)d=1; print d} }')
 
     install -d -m 755 /usr/local/etc
     printf 'HOLD=%s\n' "$HOLD_SECONDS" > "$CONF"
@@ -221,12 +217,12 @@ apply_duration() {
 
     # Idle sleep timer == awake window, so the lid-open case sleeps when the
     # daemon releases `disablesleep`. disksleep matched for consistency.
+    # displaysleep (screen-off) is left untouched -- it follows the user's
+    # macOS display settings, including any changes they make later.
     pmset -a sleep "$SLEEP_MIN"
     pmset -a disksleep "$SLEEP_MIN"
-    pmset -a displaysleep "$DISP_MIN"
 
     APPLIED_HOLD=$HOLD_SECONDS
-    APPLIED_DISP=$DISP_MIN
 }
 
 write_plist() {
@@ -382,7 +378,7 @@ cmd_install() {
         *) echo "warning: no lid sensor detected; lidle is meant for" >&2
            echo "         MacBooks. Continuing anyway." >&2 ;;
     esac
-    local HOURS="${1:-}" src
+    local HOURS="${1:-}" src reply
     if [ -z "$HOURS" ]; then
         if [ -r "$CONF" ]; then
             HOURS=$(hold_seconds)                                              # reuse existing window
@@ -412,6 +408,17 @@ cmd_install() {
     launchctl bootstrap system "$PLIST" || die "launchctl bootstrap failed"
 
     print_install_summary "$HOURS"
+
+    # On an interactive install, offer the menu bar item (skip when it's already
+    # set up, or when running non-interactively / scripted).
+    if [ ! -f "$SUDOERS" ] && tty_available; then
+        printf '\nAdd the menu bar item now? [Y/n] ' > /dev/tty
+        read -r reply < /dev/tty || reply=n
+        case "$reply" in
+            ''|[Yy]*) echo; cmd_menu_setup ;;
+            *) echo "Skipped. Add it later with: sudo lidle menu-setup" ;;
+        esac
+    fi
 }
 
 # Stop the daemon, remove its plist + state + menu artifacts, and restore normal
@@ -426,7 +433,7 @@ teardown() {
     # enough (SwiftBar watches the folder) and a refresh URL would pop it forward.
     remove_menu_artifacts "$(target_user)"
 
-    restore_pmset              # put the original sleep / display timers back
+    restore_pmset              # put the original sleep / disksleep timers back
     pmset -a disablesleep 0    # and re-enable normal sleep
 }
 
@@ -435,7 +442,7 @@ cmd_uninstall() {
     teardown
     rm -f "$BIN" "$SAVED_PMSET" "$CONF" "$LOG"   # full wipe (quit keeps conf/log)
     echo "Removed ${LABEL}, re-enabled normal sleep, and restored the sleep /"
-    echo "disksleep / displaysleep timers to the values you had before installing."
+    echo "disksleep timers to the values you had before installing."
 
     # Confirm a clean removal: every file/service lidle creates should be gone.
     local f clean=yes
@@ -472,7 +479,7 @@ cmd_set() {
     if [ "$APPLIED_HOLD" = indefinite ]; then
         win="indefinite -- the Mac won't sleep on idle or lid-close until you change it"
     else
-        win="$(awk -v s="$APPLIED_HOLD" 'BEGIN{printf "%g", s/3600}') h (screen off after ${APPLIED_DISP} min)"
+        win="$(awk -v s="$APPLIED_HOLD" 'BEGIN{printf "%g", s/3600}') h"
     fi
     if [ "$was_paused" = yes ]; then
         echo "Resumed; awake window now ${win}."
@@ -587,11 +594,12 @@ cmd_menu() {
     if paused_now; then paused=yes; else paused=no; fi
     awake=$(pmset -g 2>/dev/null | awk '/SleepDisabled/{print $2; exit}')
 
-    # ---- Title (icon only): sun = holding awake, moon = not (off or paused) ----
+    # ---- Title (icon only): sun = holding awake, crescent = not (off or paused).
+    # Both are monochrome text-style glyphs, so the item blends with the menu bar. ----
     if [ "${awake:-0}" = 1 ] && [ "$paused" = no ]; then
         echo "☀"
     else
-        echo "🌙"
+        echo "☾"
     fi
     echo "---"
 
@@ -633,7 +641,9 @@ cmd_menu() {
     echo "Open log | bash=/usr/bin/open param1=$LOG terminal=false"
     echo "Refresh | refresh=true"
     echo "---"
-    echo "Quit lidle | bash=/usr/bin/sudo param1=$BIN param2=quit terminal=false"
+    echo "Remove menu bar | bash=/usr/bin/sudo param1=$BIN param2=menu-remove terminal=false"
+    echo "---"
+    echo "Exit lidle | bash=/usr/bin/sudo param1=$BIN param2=quit terminal=false"
 }
 
 # Custom… menu action (awake window): prompt for hours, then apply via sudo set.
@@ -664,8 +674,8 @@ cmd_pause_prompt() {
 write_sudoers() {
     local user="$1" tmp
     tmp=$(mktemp) || die "mktemp failed"
-    printf '%s ALL=(root) NOPASSWD: %s pause, %s pause *, %s resume, %s set *, %s quit\n' \
-        "$user" "$BIN" "$BIN" "$BIN" "$BIN" "$BIN" > "$tmp"
+    printf '%s ALL=(root) NOPASSWD: %s pause, %s pause *, %s resume, %s set *, %s quit, %s menu-remove\n' \
+        "$user" "$BIN" "$BIN" "$BIN" "$BIN" "$BIN" "$BIN" > "$tmp"
     if visudo -cf "$tmp" >/dev/null 2>&1; then
         install -m 0440 -o root -g wheel "$tmp" "$SUDOERS"
         rm -f "$tmp"
@@ -678,6 +688,69 @@ write_sudoers() {
 # SwiftBar's configured plugin folder, read as the target user.
 swiftbar_plugin_dir() {
     sudo -u "$1" defaults read com.ameba.SwiftBar PluginDirectory 2>/dev/null
+}
+
+# True when we have a controlling terminal we can prompt on.
+tty_available() { { : < /dev/tty; } 2>/dev/null; }
+
+# Path to the user's Homebrew binary (Apple Silicon or Intel); empty if none.
+user_brew() {
+    local b
+    for b in /opt/homebrew/bin/brew /usr/local/bin/brew; do
+        [ -x "$b" ] && { echo "$b"; return 0; }
+    done
+    return 1
+}
+
+# True when SwiftBar.app is installed (system-wide or in the user's ~/Applications).
+swiftbar_app_present() {
+    local home; home=$(user_home "$1")
+    [ -d /Applications/SwiftBar.app ] || [ -d "$home/Applications/SwiftBar.app" ]
+}
+
+# Make sure SwiftBar is installed with a plugin folder, offering a Homebrew
+# install when it's missing (interactive; TTY only). On success sets PLUGIN_DIR
+# and returns 0; otherwise prints guidance and returns 1.
+ensure_swiftbar() {
+    local user="$1" dir reply brew home
+
+    dir=$(swiftbar_plugin_dir "$user")
+    [ -n "$dir" ] && [ -d "$dir" ] && { PLUGIN_DIR="$dir"; return 0; }
+
+    # Offer to install SwiftBar via Homebrew when the app isn't present.
+    if ! swiftbar_app_present "$user"; then
+        brew=$(user_brew)
+        if [ -n "$brew" ] && tty_available; then
+            printf 'SwiftBar (needed for the menu bar) is not installed. Install it with Homebrew now? [Y/n] ' > /dev/tty
+            read -r reply < /dev/tty || reply=n
+            case "$reply" in
+                ''|[Yy]*)
+                    echo "Installing SwiftBar via Homebrew (this may take a moment)..."
+                    sudo -u "$user" "$brew" install --cask swiftbar \
+                        || { echo "Homebrew install failed. Install SwiftBar manually: https://swiftbar.app"; return 1; }
+                    ;;
+                *)  echo "Skipped. Install SwiftBar later, then run: sudo lidle menu-setup"; return 1 ;;
+            esac
+        else
+            echo "SwiftBar is not installed. Install it (https://swiftbar.app or"
+            echo "'brew install --cask swiftbar'), then run: sudo lidle menu-setup"
+            return 1
+        fi
+    fi
+
+    # SwiftBar is present (or just installed) but no plugin folder is configured.
+    # Bootstrap a default folder and point SwiftBar at it, so the plugin can drop
+    # in without SwiftBar's first-run folder-picker dialog.
+    dir=$(swiftbar_plugin_dir "$user")
+    if [ -z "$dir" ] || [ ! -d "$dir" ]; then
+        home=$(user_home "$user")
+        [ -n "$home" ] || { echo "couldn't resolve your home directory for the plugin folder"; return 1; }
+        dir="$home/Library/Application Support/SwiftBar/Plugins"
+        sudo -u "$user" mkdir -p "$dir"
+        sudo -u "$user" defaults write com.ameba.SwiftBar PluginDirectory "$dir"
+    fi
+    PLUGIN_DIR="$dir"
+    return 0
 }
 
 # Generate the thin SwiftBar plugin (calls our menu subcommand). The metadata
@@ -767,28 +840,22 @@ remove_menu_artifacts() {
 
 cmd_menu_setup() {
     need_root menu-setup
-    local user dir
+    local user
     user=$(target_user)
     [ -n "$user" ] || die "couldn't determine your user account to scope the sudoers rule"
     [ -f "$PLIST" ] || die "install first: sudo lidle install"
 
-    # Locate SwiftBar's plugin folder first: don't grant passwordless sudo for a
-    # menu we can't actually install yet.
-    dir=$(swiftbar_plugin_dir "$user")
-    if [ -z "$dir" ] || [ ! -d "$dir" ]; then
-        echo "SwiftBar plugin folder not found."
-        echo "Install SwiftBar (https://swiftbar.app), set its Plugin Folder, then re-run:"
-        echo "  sudo lidle menu-setup"
-        return 0
-    fi
+    # Make sure SwiftBar is installed with a plugin folder (offering a Homebrew
+    # install if needed) before granting passwordless sudo for the menu.
+    ensure_swiftbar "$user" || return 0
 
     write_sudoers "$user"
-    echo "Installed passwordless sudo rule for ${user} (pause / resume / set / quit)."
+    echo "Installed passwordless sudo rule for ${user} (pause / resume / set / quit / menu-remove)."
 
-    write_plugin "$dir" "$user"
+    write_plugin "$PLUGIN_DIR" "$user"
     install_menu_agent "$user"                                # auto-start SwiftBar at login
     sudo -u "$user" open -g -a SwiftBar 2>/dev/null || true   # ensure SwiftBar is running now
-    echo "Installed SwiftBar plugin to ${dir}/${PLUGIN_NAME}."
+    echo "Installed SwiftBar plugin to ${PLUGIN_DIR}/${PLUGIN_NAME}."
     echo "The menu item will appear now and at every login."
 }
 
