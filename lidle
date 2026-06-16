@@ -32,6 +32,7 @@ DONE="/var/run/lidle.done"
 PREV_LID="/var/run/lidle.prev-lid"
 PAUSED="/var/run/lidle.paused"
 MODE="/var/run/lidle.mode"
+EXT_CACHE="/var/run/lidle.ext-count"
 SUDOERS="/etc/sudoers.d/lidle"
 PLUGIN_NAME="lidle.5s.sh"
 AGENT_LABEL="com.lidle.menu"
@@ -78,7 +79,7 @@ parse_duration() {
     esac
 }
 
-clear_state() { rm -f "$CLOSED_SINCE" "$OPEN_SINCE" "$PREV_LID" "$DONE" "$PAUSED" "$MODE"; }
+clear_state() { rm -f "$CLOSED_SINCE" "$OPEN_SINCE" "$PREV_LID" "$DONE" "$PAUSED" "$MODE" "$EXT_CACHE"; }
 
 # Append a timestamped line to the log, but only when the worker's mode actually
 # changes (the daemon ticks every 60s; without this the log would repeat the same
@@ -124,6 +125,40 @@ lid_state() {
 # Count connected external displays (meaningful when the lid is shut).
 external_count() {
     system_profiler SPDisplaysDataType 2>/dev/null | grep -c "Resolution:" || true
+}
+
+# Set `disablesleep` only when it differs from the current value. The tick runs
+# every 60s; re-issuing an unchanged value still pushes a request through the
+# power-management stack, so guarding it avoids needless per-tick churn while
+# preserving correctness (any external drift is still corrected on the next tick).
+set_disablesleep() {
+    local want="$1" cur
+    cur=$(pmset -g 2>/dev/null | awk '/SleepDisabled/{print $2; exit}')
+    [ "$cur" = "$want" ] && return 0
+    pmset -a disablesleep "$want"
+}
+
+# external_count() with light caching. Per-tick clamshell detection needs the
+# display count, but system_profiler is a heavy display-subsystem enumeration;
+# caching lets the 60s tick reuse the last count, re-reading only when forced
+# (the lid just shut) or when the cache is older than EXT_TTL. A monitor plugged
+# or unplugged while already lid-shut is noticed within EXT_TTL — acceptable,
+# since lidle only delays sleep, and it also rides out the transient enumeration
+# blips that would otherwise read as a spurious "no monitor".
+EXT_TTL=300
+cached_external_count() {
+    local force="${1:-}" now ts cnt
+    now=$(date +%s)
+    if [ "$force" != force ] && [ -r "$EXT_CACHE" ]; then
+        read -r ts cnt < "$EXT_CACHE" || true
+        case "${ts:-}" in
+            ''|*[!0-9]*) ;;                                  # no/garbled cache -> refresh
+            *) [ "$(( now - ts ))" -lt "$EXT_TTL" ] && { echo "$cnt"; return 0; } ;;
+        esac
+    fi
+    cnt=$(external_count)
+    printf '%s %s\n' "$now" "$cnt" > "$EXT_CACHE"
+    echo "$cnt"
 }
 
 # True (0) when a pause is in effect right now. Read-only and honors a timed
@@ -272,7 +307,7 @@ cmd_tick() {
             rm -f "$PAUSED"                  # expired -> fall through to normal logic
         else
             log_mode paused "paused — letting macOS sleep normally"
-            pmset -a disablesleep 0          # paused -> let macOS sleep normally
+            set_disablesleep 0               # paused -> let macOS sleep normally
             return 0
         fi
     fi
@@ -283,14 +318,14 @@ cmd_tick() {
     # ---- No window configured (missing/empty conf): behave like a normal Mac ----
     if [ -z "$HOLD" ]; then
         log_mode unconfigured "no awake window configured — letting macOS sleep normally"
-        pmset -a disablesleep 0
+        set_disablesleep 0
         return 0
     fi
 
     # ---- Indefinite awake window: hold awake forever, never count down ----
     if [ "$HOLD" = indefinite ]; then
         log_mode indefinite "awake window is indefinite — holding awake (never sleeps)"
-        pmset -a disablesleep 1
+        set_disablesleep 1
         return 0
     fi
 
@@ -311,34 +346,36 @@ cmd_tick() {
         [ "$since_open" -lt "$idle" ] && idle=$since_open   # idle = min(HID idle, time open)
         if [ "$idle" -ge "$HOLD" ]; then
             log_mode open-idle "lid open, idle past the awake window — sleep allowed"
-            pmset -a disablesleep 0
+            set_disablesleep 0
         else
             log_mode open-hold "lid open — holding awake (awake window running)"
-            pmset -a disablesleep 1
+            set_disablesleep 1
         fi
     else
         # ---- Lid SHUT (built-in panel off -> this counts external monitors) ----
         rm -f "$OPEN_SINCE"
-        ext=$(system_profiler SPDisplaysDataType 2>/dev/null | grep -c "Resolution:")
+        # Lid just shut -> read displays fresh; already shut -> reuse the cached
+        # count (a hotplug while shut is caught within EXT_TTL).
+        if [ "$prev" = closed ]; then ext=$(cached_external_count); else ext=$(cached_external_count force); fi
         if [ "$ext" -gt 0 ]; then
             rm -f "$CLOSED_SINCE" "$DONE"        # clamshell work: stay awake, no countdown
             log_mode clamshell "lid shut with external monitor — holding awake (clamshell)"
-            pmset -a disablesleep 1
+            set_disablesleep 1
         elif [ -f "$DONE" ]; then
             log_mode shut-done "lid shut, no monitor, awake window elapsed — sleep allowed"
             # already released this session; hands off (no pmset change)
         elif [ ! -f "$CLOSED_SINCE" ]; then
             echo "$now" > "$CLOSED_SINCE"        # just unplugged / closed with no monitor
             log_mode shut-hold "lid shut, no monitor — holding awake (awake window running)"
-            pmset -a disablesleep 1
+            set_disablesleep 1
         elif [ $(( now - $(cat "$CLOSED_SINCE") )) -ge "$HOLD" ]; then
             rm -f "$CLOSED_SINCE"
             touch "$DONE"
             log_mode shut-done "lid shut, no monitor, awake window elapsed — sleep allowed"
-            pmset -a disablesleep 0              # window up: lid shut -> macOS sleeps now
+            set_disablesleep 0              # window up: lid shut -> macOS sleeps now
         else
             log_mode shut-hold "lid shut, no monitor — holding awake (awake window running)"
-            pmset -a disablesleep 1
+            set_disablesleep 1
         fi
     fi
 }

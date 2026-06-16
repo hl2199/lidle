@@ -20,8 +20,22 @@ only postpones the sleeps that were going to happen anyway.
 
 ## Install
 
+### Homebrew (recommended)
+
 ```sh
-git clone https://github.com/<you>/lidle.git
+brew tap hl2199/lidle https://github.com/hl2199/lidle
+brew install lidle
+sudo lidle install            # asks how many hours to stay awake (or "indefinite")
+```
+
+Homebrew puts `lidle` on your PATH; `sudo lidle install` then sets up the
+background service. That second step needs root, which Homebrew can't do for you —
+brew prints the same reminder as a caveat.
+
+### From source
+
+```sh
+git clone https://github.com/hl2199/lidle.git
 cd lidle
 sudo ./lidle install          # asks how many hours to stay awake (or "indefinite")
 ```
@@ -111,6 +125,27 @@ Set the window to **`indefinite`** to keep the Mac awake with no time limit.
   demand, `pause` first: `sudo lidle pause && pmset sleepnow`.
 - Settings are system-wide and persist across reboots; the 60-second check makes
   timing accurate to about a minute.
+
+## Updating
+
+**Homebrew:**
+
+```sh
+brew upgrade lidle
+sudo lidle install            # re-applies the update to the running service
+```
+
+**From source:**
+
+```sh
+git pull
+sudo ./lidle install          # re-applies the update to the running service
+```
+
+Either way the second step is what actually updates the running service: the
+privileged daemon lives at `/usr/local/bin/lidle`, which neither `brew` nor `git`
+touches, so re-running `install` copies the new script there and restarts it. Your
+awake-window setting is preserved.
 
 ## Uninstall
 
