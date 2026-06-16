@@ -415,15 +415,13 @@ cmd_install() {
         *) echo "warning: no lid sensor detected; lidle is meant for" >&2
            echo "         MacBooks. Continuing anyway." >&2 ;;
     esac
+    # Treat every install as a first-time setup: always ask for the awake window
+    # (or require it as an argument), never silently reuse a prior config. We do
+    # not assume the user still wants their previous preference.
     local HOURS="${1:-}" src reply
-    if [ -z "$HOURS" ]; then
-        if [ -r "$CONF" ]; then
-            HOURS=$(hold_seconds)                                              # reuse existing window
-            [ "$HOURS" = indefinite ] || HOURS=$(awk -v s="$HOURS" 'BEGIN{printf "%g", s/3600}')
-        elif { : < /dev/tty; } 2>/dev/null; then     # a real terminal we can prompt on
-            printf 'Hours to stay awake before sleeping, or "indefinite": ' > /dev/tty
-            read -r HOURS < /dev/tty || true
-        fi
+    if [ -z "$HOURS" ] && { : < /dev/tty; } 2>/dev/null; then     # a real terminal we can prompt on
+        printf 'Hours to stay awake before sleeping, or "indefinite": ' > /dev/tty
+        read -r HOURS < /dev/tty || true
     fi
     [ -n "$HOURS" ] || die "no awake window given. Pass hours (e.g. 'sudo lidle install 3') or 'indefinite'."
 
