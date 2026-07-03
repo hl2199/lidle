@@ -31,13 +31,17 @@ sudo ./lidle install          # enter number of hours to stay awake for (fractio
 
 `lidle`'s menu bar option is implemented through [SwiftBar](https://swiftbar.app). It adds a narrowly-scoped, passwordless `sudo` rule that runs lidle's own pause / resume / set / quit / menu-remove.
 
-You don't have to set this up by hand-- when you run `sudo lidle install` in a terminal it offers to add the menu item for you, and if SwiftBar isn't installed it offers to install it via Homebrew. To add it on its own (or after skipping it at install):
+SwiftBar can be installed by running
+
+```sh
+brew install swiftbar
+```
+
+or alternatively, when you run `sudo lidle install`, `lidle` will install it for you if you choose to go ahead with the menu bar option. You can always add the menu bar option later if you choose to skip it at install by running
 
 ```sh
 sudo lidle menu-setup            # installs SwiftBar via Homebrew if it's missing
 ```
-
-Without Homebrew, install SwiftBar from https://swiftbar.app first, then run `menu-setup`.
 
 The menu item shows **☀** while lidle is holding your Mac awake and **☾** when it isn't (off or paused). Click it to
 - set a new awake window (1h / 3h / 8h / indefinite, or a custom value)
