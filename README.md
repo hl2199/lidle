@@ -4,7 +4,7 @@
 
 <h1 align="center">lidle</h1>
 
-<p align="center"><em>Give your MacBook an awake window before it sleeps.</em></p>
+<p align="center"><em>A sun that won't set when the lid comes down.</em></p>
 
 I always find that I'm running things on my laptop and need to keep it running for a while (but not indefinitely!) even as I'm on the move, but Mac of course sleeps the system as soon as the lid closes. The native option 'caffeinate' needs to be triggered every time; `pmset` is persistent, but disables sleep indefinitely. `Amphetamine` can be conditionally triggered but cannot let the system sleep if your process cannot be reliably assigned to a non-persisting trigger. 
 
