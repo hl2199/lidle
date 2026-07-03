@@ -1,0 +1,33 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 120 120" width="120" height="120" role="img" aria-label="lidle — a sun rising behind a closed MacBook">
+  <defs>
+    <linearGradient id="p-night" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#3E4369"/>
+      <stop offset="1" stop-color="#20233A"/>
+    </linearGradient>
+    <linearGradient id="p-sun" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#FFD986"/>
+      <stop offset="1" stop-color="#F0902B"/>
+    </linearGradient>
+    <radialGradient id="p-glow" cx="0.5" cy="0.5" r="0.5">
+      <stop offset="0" stop-color="#F9BC5E" stop-opacity="0.55"/>
+      <stop offset="0.7" stop-color="#F9BC5E" stop-opacity="0.12"/>
+      <stop offset="1" stop-color="#F9BC5E" stop-opacity="0"/>
+    </radialGradient>
+  </defs>
+  <rect width="120" height="120" rx="28" fill="url(#p-night)"/>
+  <circle cx="60" cy="66" r="44" fill="url(#p-glow)"/>
+  <g stroke="#F7B24C" stroke-width="4.5" stroke-linecap="round">
+    <line x1="60" y1="37" x2="60" y2="28"/>
+    <line x1="47.5" y1="40.35" x2="43" y2="32.56"/>
+    <line x1="72.5" y1="40.35" x2="77" y2="32.56"/>
+    <line x1="38.35" y1="49.5" x2="30.56" y2="45"/>
+    <line x1="81.65" y1="49.5" x2="89.44" y2="45"/>
+    <line x1="35" y1="58.25" x2="26" y2="56.9"/>
+    <line x1="85" y1="58.25" x2="94" y2="56.9"/>
+  </g>
+  <circle cx="60" cy="62" r="20" fill="url(#p-sun)"/>
+  <ellipse cx="53" cy="55" rx="8" ry="6" fill="#FFE9BE" opacity="0.45"/>
+  <rect x="24" y="74" width="72" height="12" rx="6" fill="#141620"/>
+  <rect x="28" y="76.4" width="64" height="2" rx="1" fill="#3A3F55"/>
+  <rect x="0.5" y="0.5" width="119" height="119" rx="27.5" fill="none" stroke="#FFFFFF" stroke-opacity="0.09"/>
+</svg>
