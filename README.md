@@ -1,62 +1,37 @@
 # lidle
 
-**Give your MacBook an awake window before it sleeps** — so closing the lid or
-unplugging your external display doesn't put it to sleep the *instant* you do it.
+I always find that I'm running things on my laptop and need to keep it running for a while (but not indefinitely!) even as I'm on the move, but Mac of course sleeps the system as soon as the lid closes. The native option 'caffeinate' needs to be triggered every time; `pmset` is persistent, but disables sleep indefinitely. `Amphetamine` can be conditionally triggered but cannot let the system sleep if your process cannot be reliably assigned to a non-persisting trigger. 
 
-By default, macOS sleeps almost immediately when you close the lid with no
-external display, or when you unplug the monitor you were using in clamshell
-mode. `lidle` holds that sleep off for a window you choose, then lets the Mac
-sleep normally. Start using it again and the timer resets.
+**`lidle` does a single thing-- it keeps your MacBook running for an additional awake window whenever it would otherwise sleep, and it is a persistent setting.** It enables:
 
-Sleep is always **delayed, never forced.** If something would normally keep your
-Mac awake (media playback, a download, screen sharing), it still does — lidle
-only postpones the sleeps that were going to happen anyway.
+- additional awake window on lid close
+- additional awake window on idle trigger
+- additional awake window on monitor disconnect in clamshell mode
+- indefinite awake as long as monitor connected (native behavior)
 
-## Requirements
-
-- A **MacBook** running macOS (developed and tested on macOS 15 Sequoia; works on
-  Apple Silicon and Intel). It relies on the lid / clamshell sensor.
-- **Administrator access** — it installs a small system-wide background service.
+`lidle` does not touch your display sleep options, letting the display sleep as normal to conserve battery. Your Mac's display sleep habits can be set as usual in system settings. 
 
 ## Install
 
-### Homebrew (recommended)
-
-```sh
-brew tap hl2199/lidle https://github.com/hl2199/lidle
-brew install lidle
-sudo lidle install            # asks how many hours to stay awake (or "indefinite")
-```
-
-Homebrew puts `lidle` on your PATH; `sudo lidle install` then sets up the
-background service. That second step needs root, which Homebrew can't do for you —
-brew prints the same reminder as a caveat.
-
-### From source
+`lidle` requires **administrator access** as it installs a small system-wide background service.
 
 ```sh
 git clone https://github.com/hl2199/lidle.git
 cd lidle
-sudo ./lidle install          # asks how many hours to stay awake (or "indefinite")
+sudo ./lidle install          # enter number of hours to stay awake for (fractions allowed)
 ```
 
-This copies `lidle` to `/usr/local/bin/` (so you can run it from anywhere) and
-starts a background service that does the work. Run it in a real Terminal window
-so `sudo` can prompt for your password.
-
-> To set the window up front instead of being prompted: `sudo ./lidle install 2`
-> (`1.5` and other fractions are allowed).
+`lidle` will now run in the background and give your Mac an additional awake window. 
 
 ## Using lidle
 
-### Menu bar (recommended)
+`lidle` can be installed as a menu bar item or toggled from the command line.
 
-The easiest way to use lidle day to day is a menu bar item, via
-[SwiftBar](https://swiftbar.app). When you run `sudo lidle install` in a terminal it
-offers to set this up for you — and if SwiftBar isn't installed, it offers to install
-it via [Homebrew](https://brew.sh). So there's usually nothing else to do.
+### Menu bar
 
-To add the menu item on its own (or after declining it at install):
+`lidle`'s menu bar option is implemented through [SwiftBar](https://swiftbar.app). It adds a narrowly-scoped, passwordless `sudo` rule that runs lidle's own pause / resume / set / quit / menu-remove.
+
+You don't have to set this up by hand-- when you run `sudo lidle install` in a terminal it offers to add the menu item for you, and if SwiftBar isn't installed it offers to install it via Homebrew. To add it on its own (or after skipping it at install):
 
 ```sh
 sudo lidle menu-setup            # installs SwiftBar via Homebrew if it's missing
@@ -64,22 +39,17 @@ sudo lidle menu-setup            # installs SwiftBar via Homebrew if it's missin
 
 Without Homebrew, install SwiftBar from https://swiftbar.app first, then run `menu-setup`.
 
-The icon is **☀** when lidle is holding your Mac awake and **☾** when it isn't
-(off or paused). Click it for:
+The menu item shows **☀** while lidle is holding your Mac awake and **☾** when it isn't (off or paused). Click it to
+- set a new awake window (1h / 3h / 8h / indefinite, or a custom value)
+- pause the tool for a while, or until you resume (lets the Mac sleep normally)
+- open the log (to make sure the tool is running as expected)
+- remove the menu bar item, or exit lidle entirely
 
-- **Pause for** ▸ 1h / 3h / 8h / Indefinite / Custom… — let the Mac sleep normally for a while
-- **Set awake window** ▸ 1h / 3h / 8h / Indefinite / Custom… — change how long it stays awake
-- **Open log**, **Remove menu bar** (drop just the menu, keep lidle running), and
-  **Exit** (stop lidle and restore normal sleep)
-
-`menu-setup` keeps the item across reboots and adds a narrowly-scoped,
-passwordless `sudo` rule so the buttons act instantly — it can run **only**
-lidle's own pause / resume / set / quit, nothing else. Remove just the menu with
-`sudo lidle menu-remove`.
+Remove the menu bar item (leaving terminal-only control) using `sudo lidle menu-remove`. Add it back using `sudo lidle menu-setup`. 
 
 ### Command line
 
-Everything the menu does is also a command:
+`lidle` can also be configured directly in the command line without needing to install the menu bar option. 
 
 | Command | sudo | What it does |
 |---|---|---|
@@ -91,15 +61,8 @@ Everything the menu does is also a command:
 | `lidle logs` | no | Follow the log (one line per state change). |
 | `lidle quit` | yes | Stop lidle but keep it installed. |
 | `lidle uninstall` | yes | Remove everything and restore normal sleep. |
-
-```text
-$ lidle status
-lidle: installed
-  Awake window:  3 h
-  Lid:           open
-  Paused:        no
-  Keeping awake: yes  (sleeps in ~2 h 14 m if left idle)
-```
+| `lidle version` | no | Print the version. |
+| `lidle help` | no | Show usage. |
 
 ## What to expect
 
@@ -114,38 +77,6 @@ timer. In each situation:
 | Lid shut, no monitor (closed, or unplugged) | Stays awake for the window, then sleeps. Opening the lid or reconnecting a monitor resets it. |
 
 Set the window to **`indefinite`** to keep the Mac awake with no time limit.
-
-## Heads-up
-
-- **Heat** — while a window is active, a closed MacBook with no external display
-  stays fully awake (and warm). Keep an eye on it, especially with an
-  `indefinite` window, which never ends on its own.
-- **Manual sleep** — while a window is active, the Apple menu's *Sleep* won't
-  sleep the Mac (lidle has to stay armed to catch a lid-close). To sleep on
-  demand, `pause` first: `sudo lidle pause && pmset sleepnow`.
-- Settings are system-wide and persist across reboots; the 60-second check makes
-  timing accurate to about a minute.
-
-## Updating
-
-**Homebrew:**
-
-```sh
-brew upgrade lidle
-sudo lidle install            # re-applies the update to the running service
-```
-
-**From source:**
-
-```sh
-git pull
-sudo ./lidle install          # re-applies the update to the running service
-```
-
-Either way the second step is what actually updates the running service: the
-privileged daemon lives at `/usr/local/bin/lidle`, which neither `brew` nor `git`
-touches, so re-running `install` copies the new script there and restarts it. Your
-awake-window setting is preserved.
 
 ## Uninstall
 
@@ -176,8 +107,11 @@ The menu bar item is a thin SwiftBar plugin that calls `lidle menu`; a per-user
 LaunchAgent starts SwiftBar at login so the item is there after reboots.
 
 Files it manages: `/usr/local/bin/lidle`,
-`/Library/LaunchDaemons/com.lidle.plist`, config `/usr/local/etc/lidle.conf`, and
-log `/var/log/lidle.log`.
+`/Library/LaunchDaemons/com.lidle.plist`, config `/usr/local/etc/lidle.conf`, the
+saved sleep-timer snapshot `/usr/local/etc/lidle.saved-pmset`, log
+`/var/log/lidle.log`, and runtime state under `/var/run/lidle.*`. The menu bar item
+also adds a sudoers rule `/etc/sudoers.d/lidle`, a SwiftBar plugin, and a per-user
+login agent `~/Library/LaunchAgents/com.lidle.menu.plist`.
 
 ## License
 
