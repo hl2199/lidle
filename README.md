@@ -35,10 +35,6 @@ sudo ./lidle install          # enter number of hours to stay awake for (fractio
 
 ### Menu bar
 
-<p align="center">
-  <img src="docs/lidle-menu-screenshot.png" width="400" alt="lidle menu bar dropdown">
-</p>
-
 `lidle`'s menu bar option is implemented through [SwiftBar](https://swiftbar.app). It adds a narrowly-scoped, passwordless `sudo` rule that runs lidle's own pause / resume / set / quit / menu-remove. The menu bar is optional-- `lidle` can be toggled entirely from the command line if preferred.
 
 SwiftBar can be installed by running
@@ -58,6 +54,10 @@ The menu item shows **☀** while lidle is holding your Mac awake and **☾** wh
 - pause the tool for a while, or until you resume (lets the Mac sleep normally)
 - open the log (to make sure the tool is running as expected)
 - remove the menu bar item, or exit lidle entirely
+
+<p align="center">
+  <img src="docs/lidle-menu-screenshot.png" width="300" alt="lidle menu bar dropdown">
+</p>
 
 Remove the menu bar item (leaving terminal-only control) using `sudo lidle menu-remove`. Add it back using `sudo lidle menu-setup`. 
 
