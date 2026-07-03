@@ -35,6 +35,10 @@ sudo ./lidle install          # enter number of hours to stay awake for (fractio
 
 ### Menu bar
 
+<p align="center">
+  <img src="docs/lidle-menu-screenshot.png" width="400" alt="lidle menu bar dropdown">
+</p>
+
 `lidle`'s menu bar option is implemented through [SwiftBar](https://swiftbar.app). It adds a narrowly-scoped, passwordless `sudo` rule that runs lidle's own pause / resume / set / quit / menu-remove. The menu bar is optional-- `lidle` can be toggled entirely from the command line if preferred.
 
 SwiftBar can be installed by running
