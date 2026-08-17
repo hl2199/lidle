@@ -34,6 +34,7 @@ PAUSED="/var/run/lidle.paused"
 MODE="/var/run/lidle.mode"
 EXT_CACHE="/var/run/lidle.ext-count"
 EXT_CONFIRM="/var/run/lidle.ext-confirm"
+RELEASED_AT="/var/run/lidle.released-at"
 SUDOERS="/etc/sudoers.d/lidle"
 PLUGIN_NAME="lidle.5s.sh"
 AGENT_LABEL="com.lidle.menu"
@@ -80,7 +81,7 @@ parse_duration() {
     esac
 }
 
-clear_state() { rm -f "$CLOSED_SINCE" "$OPEN_SINCE" "$PREV_LID" "$DONE" "$PAUSED" "$MODE" "$EXT_CACHE" "$EXT_CONFIRM"; }
+clear_state() { rm -f "$CLOSED_SINCE" "$OPEN_SINCE" "$PREV_LID" "$DONE" "$PAUSED" "$MODE" "$EXT_CACHE" "$EXT_CONFIRM" "$RELEASED_AT"; }
 
 # Append a timestamped line to the log, but only when the worker's mode actually
 # changes (the daemon ticks every 60s; without this the log would repeat the same
@@ -246,36 +247,52 @@ restore_pmset() {
     done < "$SAVED_PMSET"
 }
 
+# Point pmset's idle timers at the configured awake window.
+#
+# Idle sleep timer == awake window, so the lid-open case sleeps when the daemon
+# releases `disablesleep`. disksleep matched for consistency. displaysleep
+# (screen-off) is left untouched -- it follows the user's macOS display
+# settings, including any changes they make later.
+#
+# Split out of apply_duration so `resume` (and a timed pause's expiry) can put
+# these back after `pause` handed them to the user's originals. Reads the conf,
+# so callers must write it first.
+apply_sleep_timers() {
+    local h min
+    h=$(hold_seconds)
+    [ -n "$h" ] || return 0
+    if [ "$h" = indefinite ]; then
+        pmset -a sleep 0            # 0 = never idle-sleep
+        pmset -a disksleep 0
+        return 0
+    fi
+    min=$(awk -v s="$h" 'BEGIN{m=int((s/60)+0.5); if(m<1)m=1; print m}')
+    pmset -a sleep "$min"
+    pmset -a disksleep "$min"
+}
+
 # Write conf + matching pmset timers for HOURS. Leaves APPLIED_HOLD set for the
 # caller's summary.
 apply_duration() {
-    local HOURS="$1" HOLD_SECONDS SLEEP_MIN
+    local HOURS="$1" HOLD_SECONDS
     if [ "$HOURS" = indefinite ]; then
         install -d -m 755 /usr/local/etc
         printf 'HOLD=indefinite\n' > "$CONF"; chmod 644 "$CONF"
         save_pmset                  # capture the originals once, before we overwrite
-        pmset -a sleep 0            # 0 = never idle-sleep
-        pmset -a disksleep 0
+        apply_sleep_timers
         APPLIED_HOLD=indefinite
         return 0
     fi
     awk -v h="$HOURS" 'BEGIN{exit !(h+0>0)}' \
         || die "HOURS must be a positive number or 'indefinite' (got '${HOURS}')"
     HOLD_SECONDS=$(awk -v h="$HOURS" 'BEGIN{printf "%d", (h*3600)+0.5}')
-    SLEEP_MIN=$(awk -v s="$HOLD_SECONDS" 'BEGIN{m=int((s/60)+0.5); if(m<1)m=1; print m}')
 
     install -d -m 755 /usr/local/etc
     printf 'HOLD=%s\n' "$HOLD_SECONDS" > "$CONF"
     chmod 644 "$CONF"
 
     save_pmset                  # capture the originals once, before we overwrite
-
-    # Idle sleep timer == awake window, so the lid-open case sleeps when the
-    # daemon releases `disablesleep`. disksleep matched for consistency.
-    # displaysleep (screen-off) is left untouched -- it follows the user's
-    # macOS display settings, including any changes they make later.
-    pmset -a sleep "$SLEEP_MIN"
-    pmset -a disksleep "$SLEEP_MIN"
+    apply_sleep_timers
 
     APPLIED_HOLD=$HOLD_SECONDS
 }
@@ -312,12 +329,19 @@ PLIST
 #
 # Delay any natural system sleep by the awake window, then ALLOW (not force) it,
 # resetting whenever the computer is used again. `disablesleep` is held on so a
-# lid-close can't race us to sleep; at the awake-window mark we set it 0 and let macOS
-# sleep on its own. Because we only *allow* sleep, a power assertion (playback,
-# a download, screen sharing) still keeps the Mac awake past the mark, which is
-# correct: that sleep wasn't going to happen normally either.
+# lid-close can't race us to sleep; at the awake-window mark we set it 0 and let
+# macOS sleep on its own -- but only for as long as that sleep might actually
+# land, because while it is 0 a lid close sleeps instantly with no window at all.
+# Because we only *allow* sleep, a power assertion (playback, a download, screen
+# sharing) still keeps the Mac awake past the mark, which is correct: that sleep
+# wasn't going to happen normally either.
+#
+# How long to wait before re-offering an idle sleep the Mac declined to take.
+# See the lid-open branch: we only sit with `disablesleep` off for the one tick
+# it takes macOS to act, then re-arm so a lid close still gets its window.
+RELEASE_RETRY=1800
 cmd_tick() {
-    local now HOLD lid prev idle_ns idle since_open ext until
+    local now HOLD lid prev idle_ns idle since_open ext until last
     now=$(date +%s)
 
     # ---- Pause guard: while paused, behave like a normal Mac ----
@@ -325,6 +349,7 @@ cmd_tick() {
         until=$(cat "$PAUSED" 2>/dev/null || echo indefinite)
         if [ "$until" != indefinite ] && [ "$until" -le "$now" ] 2>/dev/null; then
             rm -f "$PAUSED"                  # expired -> fall through to normal logic
+            apply_sleep_timers               # and take the idle timers back over
         else
             log_mode paused "paused — letting macOS sleep normally"
             set_disablesleep 0               # paused -> let macOS sleep normally
@@ -365,15 +390,38 @@ cmd_tick() {
         since_open=$(( now - $(cat "$OPEN_SINCE") ))
         [ "$since_open" -lt "$idle" ] && idle=$since_open   # idle = min(HID idle, time open)
         if [ "$idle" -ge "$HOLD" ]; then
-            log_mode open-idle "lid open, idle past the awake window — sleep allowed"
-            set_disablesleep 0
+            # Window elapsed with the lid open. Dropping `disablesleep` is what
+            # lets macOS take its idle sleep -- but it also unguards a lid close,
+            # which would then sleep instantly with no window at all, and once
+            # asleep this daemon cannot run to correct it.
+            #
+            # macOS acts on the release within seconds when nothing else holds
+            # the machine awake, so offer it for a single tick and then re-arm:
+            # still being here on the next tick means something (playback, a
+            # download, a backup) is holding the Mac awake and the idle sleep is
+            # not going to happen, so there is nothing to gain by staying
+            # unguarded. Re-offer periodically so the Mac still sleeps once that
+            # lets go. We never force sleep -- an assertion always wins, which is
+            # the same contract as before; this only bounds how long we sit
+            # exposed waiting for a sleep that isn't coming.
+            last=$(cat "$RELEASED_AT" 2>/dev/null || echo 0)
+            case "$last" in ''|*[!0-9]*) last=0 ;; esac
+            if [ "$(( now - last ))" -ge "$RELEASE_RETRY" ]; then
+                echo "$now" > "$RELEASED_AT"
+                log_mode open-idle "lid open, idle past the awake window — sleep allowed"
+                set_disablesleep 0
+            else
+                log_mode open-idle-held "lid open, idle past the window but something is holding the Mac awake — re-armed so a lid close still gets its window"
+                set_disablesleep 1
+            fi
         else
+            rm -f "$RELEASED_AT"                     # fresh idle episode next time
             log_mode open-hold "lid open — holding awake (awake window running)"
             set_disablesleep 1
         fi
     else
         # ---- Lid SHUT (built-in panel off -> this counts external monitors) ----
-        rm -f "$OPEN_SINCE"
+        rm -f "$OPEN_SINCE" "$RELEASED_AT"
         # Lid just shut -> read displays fresh; already shut -> reuse the cached
         # count (a hotplug while shut is caught within EXT_TTL).
         if [ "$prev" = closed ]; then ext=$(cached_external_count); else ext=$(cached_external_count force); fi
@@ -513,7 +561,7 @@ cmd_uninstall() {
     local f clean=yes
     for f in "$PLIST" "$BIN" "$CONF" "$SAVED_PMSET" "$LOG" "$SUDOERS" \
              "$CLOSED_SINCE" "$OPEN_SINCE" "$DONE" "$PREV_LID" "$PAUSED" "$MODE" \
-             "$EXT_CACHE" "$EXT_CONFIRM"; do
+             "$EXT_CACHE" "$EXT_CONFIRM" "$RELEASED_AT"; do
         [ -e "$f" ] || continue
         [ "$clean" = yes ] && { echo; echo "warning: these artifacts are still present:"; }
         clean=no; echo "  $f"
@@ -570,6 +618,7 @@ cmd_pause() {
         echo "Paused for $(fmt_dur "$secs") (until $(date -r "$until" +%H:%M)). Resume early: lidle resume"
     fi
     chmod 644 "$PAUSED"
+    restore_pmset               # hand the idle timers back to the user's own values
     cmd_tick                    # apply immediately (tick sees the pause file)
 }
 
@@ -580,6 +629,7 @@ cmd_resume() {
         return 0
     fi
     rm -f "$PAUSED"
+    apply_sleep_timers          # re-point the idle timers at the awake window
     cmd_tick                    # re-arm immediately
     echo "Resumed. Keep-awake is active again."
 }
