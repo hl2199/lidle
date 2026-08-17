@@ -33,6 +33,7 @@ PREV_LID="/var/run/lidle.prev-lid"
 PAUSED="/var/run/lidle.paused"
 MODE="/var/run/lidle.mode"
 EXT_CACHE="/var/run/lidle.ext-count"
+EXT_CONFIRM="/var/run/lidle.ext-confirm"
 SUDOERS="/etc/sudoers.d/lidle"
 PLUGIN_NAME="lidle.5s.sh"
 AGENT_LABEL="com.lidle.menu"
@@ -79,7 +80,7 @@ parse_duration() {
     esac
 }
 
-clear_state() { rm -f "$CLOSED_SINCE" "$OPEN_SINCE" "$PREV_LID" "$DONE" "$PAUSED" "$MODE" "$EXT_CACHE"; }
+clear_state() { rm -f "$CLOSED_SINCE" "$OPEN_SINCE" "$PREV_LID" "$DONE" "$PAUSED" "$MODE" "$EXT_CACHE" "$EXT_CONFIRM"; }
 
 # Append a timestamped line to the log, but only when the worker's mode actually
 # changes (the daemon ticks every 60s; without this the log would repeat the same
@@ -123,8 +124,27 @@ lid_state() {
 }
 
 # Count connected external displays (meaningful when the lid is shut).
+#
+# Excludes the placeholder framebuffer macOS keeps alive when the lid is shut
+# with no real display attached: because lidle holds the machine awake, the
+# window server still needs a display context, so system_profiler reports a
+# nameless 1920x1080 display whose EDID ids are the ASCII markers "unkn"
+# (vendor 0x756e6b6e) and "virt" (product 0x76697274). It is otherwise
+# indistinguishable from a real monitor -- same fields, same "Resolution:" line
+# -- so counting it made every lid-shut session look like clamshell mode and the
+# awake window never counted down.
+#
+# The JSON form is required: the EDID ids are absent from the human-readable
+# output. `_spdisplays_display-vendor-id` occurs exactly once per display (the
+# GPU object uses a different key), so it doubles as the display counter.
 external_count() {
-    system_profiler SPDisplaysDataType 2>/dev/null | grep -c "Resolution:" || true
+    system_profiler SPDisplaysDataType -json 2>/dev/null | awk '
+        /"_spdisplays_display-vendor-id"/ {
+            total++
+            if ($0 ~ /756e6b6e/) placeholder++
+        }
+        END { n = total - placeholder; print (n > 0 ? n : 0) }
+    '
 }
 
 # Set `disablesleep` only when it differs from the current value. The tick runs
@@ -357,9 +377,19 @@ cmd_tick() {
         # Lid just shut -> read displays fresh; already shut -> reuse the cached
         # count (a hotplug while shut is caught within EXT_TTL).
         if [ "$prev" = closed ]; then ext=$(cached_external_count); else ext=$(cached_external_count force); fi
+        [ "$ext" -gt 0 ] || rm -f "$EXT_CONFIRM"
         if [ "$ext" -gt 0 ]; then
-            rm -f "$CLOSED_SINCE" "$DONE"        # clamshell work: stay awake, no countdown
-            log_mode clamshell "lid shut with external monitor — holding awake (clamshell)"
+            # Require two consecutive sightings before believing a monitor
+            # appeared. A 5 h window needs ~60 consecutive clean reads, and any
+            # single one deletes CLOSED_SINCE outright, silently restarting the
+            # countdown from zero. Hold awake while confirming -- that direction
+            # errs toward staying awake, which is the safe one.
+            if [ -f "$EXT_CONFIRM" ]; then
+                rm -f "$CLOSED_SINCE" "$DONE"    # clamshell work: stay awake, no countdown
+                log_mode clamshell "lid shut with external monitor (displays=${ext}) — holding awake (clamshell)"
+            else
+                touch "$EXT_CONFIRM"
+            fi
             set_disablesleep 1
         elif [ -f "$DONE" ]; then
             log_mode shut-done "lid shut, no monitor, awake window elapsed — sleep allowed"
@@ -482,7 +512,8 @@ cmd_uninstall() {
     # Confirm a clean removal: every file/service lidle creates should be gone.
     local f clean=yes
     for f in "$PLIST" "$BIN" "$CONF" "$SAVED_PMSET" "$LOG" "$SUDOERS" \
-             "$CLOSED_SINCE" "$OPEN_SINCE" "$DONE" "$PREV_LID" "$PAUSED" "$MODE"; do
+             "$CLOSED_SINCE" "$OPEN_SINCE" "$DONE" "$PREV_LID" "$PAUSED" "$MODE" \
+             "$EXT_CACHE" "$EXT_CONFIRM"; do
         [ -e "$f" ] || continue
         [ "$clean" = yes ] && { echo; echo "warning: these artifacts are still present:"; }
         clean=no; echo "  $f"
