@@ -616,7 +616,7 @@ cmd_status() {
 # Read-only (no root). Action items shell out to sudo lidle ...,
 # made prompt-free by the sudoers drop-in that menu-setup installs.
 cmd_menu() {
-    local paused awake phrase
+    local paused awake
 
     if [ ! -f "$PLIST" ]; then
         echo "⚠️"
@@ -645,10 +645,6 @@ cmd_menu() {
         echo "Active"
     fi
     echo "Awake window: $(hold_human)"
-    if [ "$paused" = no ]; then
-        phrase=$(awake_remaining)               # same countdown 'status' shows
-        [ -n "$phrase" ] && echo "$phrase"
-    fi
     echo "---"
 
     # ---- Set awake window submenu (presets mirror 'Pause for') ----
@@ -676,7 +672,7 @@ cmd_menu() {
     echo "Open log | bash=/usr/bin/open param1=$LOG terminal=false"
     echo "Refresh | refresh=true"
     echo "---"
-    echo "Remove menu bar | bash=/usr/bin/sudo param1=$BIN param2=menu-remove terminal=false"
+    echo "Remove from menu bar | bash=/usr/bin/sudo param1=$BIN param2=menu-remove terminal=false"
     echo "---"
     echo "Exit lidle | bash=/usr/bin/sudo param1=$BIN param2=quit terminal=false"
 }
