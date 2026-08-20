@@ -39,7 +39,7 @@ SUDOERS="/etc/sudoers.d/lidle"
 PLUGIN_NAME="lidle.5s.sh"
 AGENT_LABEL="com.lidle.menu"
 
-VERSION="1.0.0"
+VERSION="1.1.0"
 
 # ---- small helpers --------------------------------------------------------
 
@@ -54,6 +54,51 @@ need_root() {
 # Spotlight app via osascript, where $SUDO_USER is unset).
 target_user() {
     echo "${SUDO_USER:-$(stat -f%Su /dev/console 2>/dev/null)}"
+}
+
+# Absolute path of the script that is currently running.
+self_path() {
+    case "$0" in
+        */*) printf '%s/%s\n' "$(cd "$(dirname "$0")" && pwd)" "$(basename "$0")" ;;
+        *)   command -v "$0" 2>/dev/null ;;
+    esac
+}
+
+# The version the background service is actually running, but only when it
+# differs from the copy you just invoked; empty otherwise.
+#
+# `install` copies the script to $BIN and the LaunchDaemon execs that absolute
+# path forever after. A package upgrade replaces whatever is on PATH -- Homebrew
+# installs into its own prefix, which precedes /usr/local/bin -- so the lidle you
+# type gets newer while the root daemon keeps running the old build, silently and
+# indefinitely. Surfacing it is the difference between a stale daemon you notice
+# and one you don't.
+version_drift() {
+    local self installed
+    [ -x "$BIN" ] || return 0
+    self=$(self_path)
+    [ -n "$self" ] && [ "$self" != "$BIN" ] || return 0
+    installed=$("$BIN" version 2>/dev/null | awk '{print $2}')
+    [ -n "$installed" ] && [ "$installed" != "$VERSION" ] || return 0
+    printf '%s\n' "$installed"
+}
+
+# Nudge SwiftBar to re-render the menu now.
+#
+# SwiftBar's own `refresh=true` fires as soon as it launches the action, not
+# when the action finishes, so it re-renders before `set`/`pause`/`resume` have
+# changed anything and the menu shows stale values until the next 5s poll.
+# Call this once the new state has settled instead.
+#
+# Runs as the console user because root has no GUI session to open a URL in, and
+# no-ops when the menu isn't installed so command-line-only users never see a
+# stray `open`. The plugin name is derived from PLUGIN_NAME so the URL can't
+# drift if the plugin file is ever renamed.
+refresh_menu() {
+    local user
+    [ -f "$SUDOERS" ] || return 0
+    user=$(target_user); [ -n "$user" ] || return 0
+    sudo -u "$user" open -g "swiftbar://refreshplugin?name=${PLUGIN_NAME%%.*}" 2>/dev/null || true
 }
 
 # Seconds -> "2 h 14 m" / "45 m" / "30 s".
@@ -135,17 +180,50 @@ lid_state() {
 # -- so counting it made every lid-shut session look like clamshell mode and the
 # awake window never counted down.
 #
-# The JSON form is required: the EDID ids are absent from the human-readable
-# output. `_spdisplays_display-vendor-id` occurs exactly once per display (the
-# GPU object uses a different key), so it doubles as the display counter.
+# It must also exclude the BUILT-IN panel. When the lid shuts on a machine with
+# no external display, macOS does not always substitute the placeholder -- if the
+# internal panel was the only display, it simply stays enumerated, with a genuine
+# Apple EDID (Color LCD, vendor 0x610). Counting that is what turned a bounded
+# lid-shut window into an unbounded clamshell hold and ran a battery flat. The
+# marker is `spdisplays_connection_type: spdisplays_internal`, which the built-in
+# has and neither a real external nor the placeholder does.
+#
+# The JSON form is required: neither the EDID ids nor the connection type are in
+# the human-readable output. `_spdisplays_display-vendor-id` occurs exactly once
+# per display (the GPU object uses a different key), so it delimits the blocks.
 external_count() {
     system_profiler SPDisplaysDataType -json 2>/dev/null | awk '
+        function flush() { if (have && !skip) n++; have = 0; skip = 0 }
         /"_spdisplays_display-vendor-id"/ {
-            total++
-            if ($0 ~ /756e6b6e/) placeholder++
+            flush(); have = 1
+            if ($0 ~ /756e6b6e/) skip = 1                 # placeholder ("unkn")
+            next
         }
-        END { n = total - placeholder; print (n > 0 ? n : 0) }
+        /"spdisplays_connection_type" *: *"spdisplays_internal"/ { skip = 1 }
+        END { flush(); print n + 0 }
     '
+}
+
+# Current power source: "battery" or "ac".
+power_source() {
+    case "$(pmset -g batt 2>/dev/null)" in
+        *"'Battery Power'"*) echo battery ;;
+        *)                   echo ac ;;
+    esac
+}
+
+# Internal battery charge as a whole-number percent. Returns 100 when there is
+# no battery or the value can't be parsed, so a desktop Mac (or a parse failure)
+# never trips the floor and starts allowing sleep.
+battery_pct() {
+    local p
+    p=$(pmset -g batt 2>/dev/null | awk '/InternalBattery/{
+            for (i = 1; i <= NF; i++) if ($i ~ /%/) { gsub(/[^0-9]/, "", $i); print $i; exit }
+        }')
+    case "${p:-}" in
+        ''|*[!0-9]*) echo 100 ;;
+        *)           echo "$p" ;;
+    esac
 }
 
 # Set `disablesleep` only when it differs from the current value. The tick runs
@@ -340,6 +418,12 @@ PLIST
 # See the lid-open branch: we only sit with `disablesleep` off for the one tick
 # it takes macOS to act, then re-arm so a lid close still gets its window.
 RELEASE_RETRY=1800
+#
+# Charge below which we stop holding the Mac awake on battery. This is a
+# backstop, not a feature: a misread anywhere else -- lid state, display count --
+# turns a bounded hold into an unbounded one, and on battery that ends with the
+# machine flat. Keep it low enough that normal use is unaffected.
+BATTERY_FLOOR=15
 cmd_tick() {
     local now HOLD lid prev idle_ns idle since_open ext until last
     now=$(date +%s)
@@ -355,6 +439,16 @@ cmd_tick() {
             set_disablesleep 0               # paused -> let macOS sleep normally
             return 0
         fi
+    fi
+
+    # ---- Battery floor: never hold the Mac awake into a dead battery ----
+    # Deliberately ahead of every other branch, including `indefinite` and
+    # clamshell: those are the modes with no countdown at all, so they are
+    # exactly the ones that flatten a battery when something upstream misreads.
+    if [ "$(power_source)" = battery ] && [ "$(battery_pct)" -lt "$BATTERY_FLOOR" ]; then
+        log_mode battery-floor "battery below ${BATTERY_FLOOR}% on battery power — letting macOS sleep normally"
+        set_disablesleep 0
+        return 0
     fi
 
     HOLD=""
@@ -504,10 +598,7 @@ cmd_install() {
     [ -n "$HOURS" ] || die "no awake window given. Pass hours (e.g. 'sudo lidle install 3') or 'indefinite'."
 
     # Resolve our own path so we can copy onto PATH (skip if already there).
-    case "$0" in
-        */*) src=$(cd "$(dirname "$0")" && pwd)/$(basename "$0") ;;
-        *)   src=$(command -v "$0") ;;
-    esac
+    src=$(self_path)
     install -d -m 755 /usr/local/bin
     if [ "$src" != "$BIN" ]; then
         install -m 755 -o root -g wheel "$src" "$BIN" || die "could not install ${BIN}"
@@ -590,6 +681,7 @@ cmd_set() {
     apply_duration "$HOURS"
     clear_state                 # also cancels any active pause
     cmd_tick                    # re-arm immediately instead of waiting up to 60s
+    refresh_menu                # ...and let the menu show it without waiting for the poll
     if [ "$APPLIED_HOLD" = indefinite ]; then
         win="indefinite -- the Mac won't sleep on idle or lid-close until you change it"
     else
@@ -620,6 +712,7 @@ cmd_pause() {
     chmod 644 "$PAUSED"
     restore_pmset               # hand the idle timers back to the user's own values
     cmd_tick                    # apply immediately (tick sees the pause file)
+    refresh_menu                # ...and let the menu show it without waiting for the poll
 }
 
 cmd_resume() {
@@ -631,6 +724,7 @@ cmd_resume() {
     rm -f "$PAUSED"
     apply_sleep_timers          # re-point the idle timers at the awake window
     cmd_tick                    # re-arm immediately
+    refresh_menu                # ...and let the menu show it without waiting for the poll
     echo "Resumed. Keep-awake is active again."
 }
 
@@ -653,7 +747,7 @@ awake_remaining() {
 }
 
 cmd_status() {
-    local now until left awake phrase
+    local now until left awake phrase drift
     now=$(date +%s)
 
     if [ -f "$PLIST" ]; then
@@ -690,6 +784,17 @@ cmd_status() {
         fi
     else
         echo "  Keeping awake: no (normal sleep in effect)"
+    fi
+
+    # A stale daemon looks identical to a working one from the outside, so say so
+    # loudly rather than leaving it to be discovered.
+    drift=$(version_drift)
+    if [ -n "$drift" ]; then
+        echo
+        echo "  warning: the background service is running lidle ${drift}, but this"
+        echo "           is lidle ${VERSION}. The service keeps running the copy at"
+        echo "           ${BIN} until you reinstall:"
+        echo "               sudo lidle install"
     fi
 }
 
